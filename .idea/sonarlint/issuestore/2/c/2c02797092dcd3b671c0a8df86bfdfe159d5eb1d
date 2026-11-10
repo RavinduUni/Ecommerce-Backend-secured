@@ -1,0 +1,15 @@
+
+
+java:S1192>"QDefine a constant instead of duplicating this literal "/api/products/**" 3 times.(³‹ãJ$e7f34455-0099-4e4b-9cc9-25eda80afe5e
+‡
+java:S1192:"FDefine a constant instead of duplicating this literal "ADMIN" 7 times.(ÄƒƒÌùÿÿÿÿJ$74517270-89c7-406f-9925-f3c8a083e060
+~
+java:S6813!"BRemove this field injection and use constructor injection instead.(êæÄŞJ$9324f0cd-ef09-45f8-a432-08768a9d8e41
+~
+java:S6813#"BRemove this field injection and use constructor injection instead.(êæÄŞJ$00ad4989-143a-43fe-80df-b0c90e0b3fc4
+h
+java:S6857'",Correct this malformed property placeholder.(®œçÆJ$e2cb2983-aa18-4795-941c-b95f3f304f01
+¡
+java:S3305""`Inject this field value directly into "daoAuthenticationProvider", the only method that uses it.(ÙÍ•¯üÿÿÿÿJ$d1b89b3e-7e9a-4ad8-b939-c0885d4964fb
+–
+java:S3305$"ZInject this field value directly into "securityFilterChain", the only method that uses it.(ªˆßÙJ$a079f95f-b087-4bce-9bf4-2128622c6898

@@ -3,7 +3,6 @@ package com.ecom.service;
 import com.ecom.dto.CartItem;
 import com.ecom.entity.CartItemEntity;
 import com.ecom.entity.ProductEntity;
-import com.ecom.entity.UserEntity;
 import com.ecom.exception.ApiException;
 import com.ecom.mapper.CartItemMapper;
 import com.ecom.repository.CartItemRepository;
@@ -41,12 +40,10 @@ public class CartService {
             throw ApiException.badRequest("Quantity must be at least 1.");
         }
 
-        ProductEntity product = productRepository.findById(cartItem.getProduct().getId())
-                .filter(p -> Boolean.TRUE.equals(p.getActive()))
+        ProductEntity product = productRepository.findByIdAndActiveTrue(cartItem.getProduct().getId())
                 .orElseThrow(() -> ApiException.notFound("That product is no longer available."));
 
-        UserEntity user = findUser(userId);
-        CartItemEntity existing = cartItemRepository.findByUserAndProduct(user, product);
+        CartItemEntity existing = cartItemRepository.findByUserIdAndProductId(userId, product.getId()).orElse(null);
         int alreadyInCart = existing != null ? existing.getQuantity() : 0;
         int stock = product.getStockQuantity() != null ? product.getStockQuantity() : 0;
 
@@ -57,9 +54,11 @@ public class CartService {
                     : "Only " + stock + " of " + product.getName() + " in stock.");
         }
 
-        CartItemEntity line = existing != null ? existing : new CartItemEntity();
-        if (existing == null) {
-            line.setUser(user);
+        CartItemEntity line = existing;
+        if (line == null) {
+            line = new CartItemEntity();
+            // A reference is enough to set the foreign key; the user row isn't loaded.
+            line.setUser(userRepository.getReferenceById(userId));
             line.setProduct(product);
         }
         line.setQuantity(alreadyInCart + quantity);
@@ -71,24 +70,22 @@ public class CartService {
 
     @Transactional
     public String removeFromCart(Long userId, Long productId) {
-        UserEntity user = findUser(userId);
-        ProductEntity product = productRepository.findById(productId)
-                .orElseThrow(() -> ApiException.notFound("Product not found."));
-
-        CartItemEntity existing = cartItemRepository.findByUserAndProduct(user, product);
-        if (existing == null) {
+        if (cartItemRepository.deleteLine(userId, productId) == 0) {
             throw ApiException.notFound("That item isn't in your cart.");
         }
-        cartItemRepository.delete(existing);
         return "Item removed successfully";
     }
 
+    /** Admin view: every cart line, loaded with product and user in one query. */
+    @Transactional(readOnly = true)
     public List<CartItem> getCartItems() {
-        return cartItemRepository.findAll().stream().map(cartItemMapper::toCartItemDto).toList();
+        return cartItemRepository.findAllWithProductAndUser().stream().map(cartItemMapper::toCartItemDto).toList();
     }
 
+    /** The user's cart, loaded with products in one query. The user is mapped inside the transaction. */
+    @Transactional(readOnly = true)
     public List<CartItem> getCart(Long userId) {
-        return cartItemRepository.findByUserId(userId)
+        return cartItemRepository.findByUserIdWithProduct(userId)
                 .stream()
                 .map(cartItemMapper::toCartItemDto)
                 .toList();
@@ -96,11 +93,6 @@ public class CartService {
 
     @Transactional
     public void clearCart(Long userId) {
-        userRepository.findById(userId).ifPresent(cartItemRepository::deleteByUser);
-    }
-
-    private UserEntity findUser(Long userId) {
-        return userRepository.findById(userId)
-                .orElseThrow(() -> ApiException.notFound("Your account could not be found."));
+        cartItemRepository.deleteAllByUserId(userId);
     }
 }

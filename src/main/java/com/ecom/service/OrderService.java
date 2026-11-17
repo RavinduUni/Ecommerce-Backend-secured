@@ -50,7 +50,8 @@ public class OrderService {
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> ApiException.notFound("Your account could not be found."));
 
-        List<CartItemEntity> cart = cartItemRepository.findByUserId(userId);
+        // Cart lines with their products in one query.
+        List<CartItemEntity> cart = cartItemRepository.findByUserIdWithProduct(userId);
         if (cart.isEmpty()) {
             throw ApiException.badRequest("Your cart is empty.");
         }

@@ -10,41 +10,59 @@ import org.springframework.security.core.userdetails.UserDetails;
 import java.util.Collection;
 import java.util.List;
 
+/**
+ * The signed-in user. Built either from the database (at sign-in, where the
+ * password is needed) or straight from the JWT claims (every other request).
+ */
 public class UserPrincipal implements UserDetails {
 
-    private final UserEntity user;
+    private final Long id;
+    private final String email;
+    private final @Nullable String password;
+    private final UserRole role;
 
+    /** From the database: used by the sign-in check. */
     public UserPrincipal(UserEntity user) {
-        this.user = user;
+        this(user.getId(), user.getEmail(), user.getPassword(), user.getRole());
+    }
+
+    private UserPrincipal(Long id, String email, @Nullable String password, @Nullable UserRole role) {
+        this.id = id;
+        this.email = email;
+        this.password = password;
+        this.role = role != null ? role : UserRole.CUSTOMER;
+    }
+
+    /** From a verified JWT: no database access, no password. */
+    public static UserPrincipal fromToken(Long id, String email, UserRole role) {
+        return new UserPrincipal(id, email, null, role);
     }
 
     /** ROLE_ADMIN or ROLE_CUSTOMER, so hasRole("ADMIN") works in SecurityConfig. */
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        UserRole role = user.getRole() != null ? user.getRole() : UserRole.CUSTOMER;
         return List.of(new SimpleGrantedAuthority("ROLE_" + role.name()));
     }
 
     @Override
     public @Nullable String getPassword() {
-        return user.getPassword();
+        return password;
     }
 
     @Override
     public String getUsername() {
-        return user.getEmail();
+        return email;
     }
 
-    /** The signed-in user's database id (taken from the JWT, never from a request header). */
     public Long getId() {
-        return user.getId();
+        return id;
     }
 
-    public UserEntity getUser() {
-        return user;
+    public UserRole getRole() {
+        return role;
     }
 
     public boolean isAdmin() {
-        return user.getRole() == UserRole.ADMIN;
+        return role == UserRole.ADMIN;
     }
 }

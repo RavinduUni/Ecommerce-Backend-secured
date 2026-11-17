@@ -1,6 +1,7 @@
 package com.ecom.service;
 
 import com.ecom.dto.User;
+import com.ecom.dto.UserPrincipal;
 import com.ecom.entity.UserEntity;
 import com.ecom.enums.UserRole;
 import com.ecom.exception.ApiException;
@@ -8,8 +9,10 @@ import com.ecom.mapper.UserMapper;
 import com.ecom.repository.UserRepository;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashMap;
 import java.util.List;
@@ -35,16 +38,19 @@ public class UserService {
         this.encoder = encoder;
     }
 
+    @Transactional(readOnly = true)   // the address is loaded lazily while mapping
     public List<User> getAllUsers() {
         return repository.findAll().stream().map(userMapper::toUserDto).toList();
     }
 
+    @Transactional(readOnly = true)
     public User getUserById(Long id) {
         return repository.findById(id)
                 .map(userMapper::toUserDto)
                 .orElseThrow(() -> ApiException.notFound("User not found."));
     }
 
+    @Transactional
     public Map<String, Object> createUser(User user) {
         String email = user.getEmail() == null ? "" : user.getEmail().trim();
         if (!EMAIL.matcher(email).matches()) {
@@ -67,7 +73,7 @@ public class UserService {
 
         UserEntity save = repository.save(userMapper.toUserEntity(user));
         User savedUserDto = userMapper.toUserDto(save);
-        String token = jwtService.generateToken(save.getEmail());
+        String token = jwtService.generateToken(save.getId(), save.getEmail(), save.getRole());
 
         Map<String, Object> register = new HashMap<>();
         register.put("student", savedUserDto);
@@ -79,6 +85,7 @@ public class UserService {
      * Partial update. Password and email are never changed here (password would be
      * stored unhashed; email is the JWT subject). Role changes need an admin.
      */
+    @Transactional
     public void updateUser(Long id, User updatedUser, boolean callerIsAdmin) {
         UserEntity existingUser = repository.findById(id)
                 .orElseThrow(() -> ApiException.notFound("User not found."));
@@ -95,9 +102,11 @@ public class UserService {
 
     /** Throws BadCredentialsException (→ 401 via GlobalExceptionHandler) on a wrong email or password. */
     public String login(User user) {
-        authenticationManager.authenticate(
+        Authentication auth = authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(user.getEmail(), user.getPassword())
         );
-        return jwtService.generateToken(user.getEmail());
+        // The authenticated principal already has the id and role, so no extra query.
+        UserPrincipal principal = (UserPrincipal) auth.getPrincipal();
+        return jwtService.generateToken(principal.getId(), principal.getUsername(), principal.getRole());
     }
 }

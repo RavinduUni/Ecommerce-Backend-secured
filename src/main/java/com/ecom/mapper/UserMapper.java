@@ -2,6 +2,7 @@ package com.ecom.mapper;
 
 import com.ecom.dto.Product;
 import com.ecom.dto.User;
+import com.ecom.dto.UserSummary;
 import com.ecom.entity.ProductEntity;
 import com.ecom.entity.UserEntity;
 import org.mapstruct.Mapper;
@@ -14,6 +15,8 @@ public interface UserMapper {
 
     User toUserDto(UserEntity entity);
     UserEntity toUserEntity(User userDto);
+    /** Small version used inside cart lines and orders. */
+    UserSummary toUserSummary(UserEntity entity);
     @Mapping(target = "id", ignore = true) // User ge ID eka update karanna epa
     @Mapping(target = "address.id", ignore = true) // Address ekak thiyenawanm eke ID eka update karanna epa
     @Mapping(target = "createdAt", ignore = true) // Created date eka update karanna epa

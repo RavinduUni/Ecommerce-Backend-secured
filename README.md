@@ -19,7 +19,7 @@ Built with **Spring Boot 4.1 · Spring Security · Spring Data JPA (Hibernate) �
 9. [JSON Error Handling Inside the Security Filter (`JsonAuthHandlers`)](#9-json-error-handling-inside-the-security-filter-jsonauthhandlers)
 10. [Global Exception Handling](#10-global-exception-handling)
 11. [Role-Based Access Control (RBAC)](#11-role-based-access-control-rbac)
-12. [Request Flows Step by Step](#12-request-flows-step-by-step)
+12. [Request Flows Step by Step](#12-request-flows-step-by-step) — full Tomcat → filters → DispatcherServlet → controller picture, public vs protected flows
 13. [Product Catalog — Paging, Full-Text Search, Sorting](#13-product-catalog--paging-full-text-search-sorting)
 14. [Caching (Caffeine)](#14-caching-caffeine)
 15. [Database Query Optimization](#15-database-query-optimization)
@@ -244,6 +244,8 @@ flowchart TD
 ```
 
 **Rule of thumb:** if a filter rejects a request, it stops there. It never reaches a controller.
+
+For the full picture of Tomcat, every filter, the DispatcherServlet and the controllers, plus step-by-step public and protected flows, see [section 12](#12-request-flows-step-by-step).
 
 ---
 
@@ -493,7 +495,269 @@ After that, an admin can promote others with `PUT /api/users/{id}` `{"role":"ADM
 
 ## 12. Request Flows Step by Step
 
-### 12.1 Register — `POST /api/users/register` (public)
+This section follows one HTTP request from the moment it reaches the server until the JSON response leaves it. Read 12.1 and 12.2 once to learn the pieces. 12.3 to 12.6 then show how the **same pieces** behave for public and protected endpoints.
+
+### 12.1 The full picture — Tomcat, filters, DispatcherServlet, controllers
+
+```
+                                CLIENT  (React app / Postman / mobile)
+                                   │
+                                   │  POST /api/cart/   Authorization: Bearer eyJ...   Content-Type: application/json
+                                   ▼
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                          EMBEDDED TOMCAT  (inside the Spring Boot jar, port 5000)                     ║
+║                                                                                                      ║
+║  ┌──────────────────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │ 1. CONNECTOR (HTTP/1.1)                                                                      │    ║
+║  │    • accepts the TCP connection, reads and parses the raw HTTP bytes                         │    ║
+║  │    • builds HttpServletRequest + HttpServletResponse objects                                 │    ║
+║  │    • hands the request to a VIRTUAL THREAD (spring.threads.virtual.enabled=true)             │    ║
+║  └───────────────────────────────────────────┬──────────────────────────────────────────────────┘    ║
+║                                              ▼                                                       ║
+║  ┌──────────────────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │ 2. SERVLET FILTER CHAIN  (Tomcat's ApplicationFilterChain, runs in "order")                  │    ║
+║  │                                                                                              │    ║
+║  │    CharacterEncodingFilter  → forces UTF-8                                                   │    ║
+║  │    FormContentFilter        → parses form bodies for PUT/PATCH/DELETE                        │    ║
+║  │    RequestContextFilter     → exposes the request to the current thread                      │    ║
+║  │    DelegatingFilterProxy ("springSecurityFilterChain")  ──────────────┐                      │    ║
+║  │                                                                       │                      │    ║
+║  │   ┌───────────────────────────────────────────────────────────────────▼──────────────────┐   │    ║
+║  │   │ 3. SPRING SECURITY  — FilterChainProxy → our SecurityFilterChain (SecurityConfig)    │   │    ║
+║  │   │                                                                                      │   │    ║
+║  │   │   SecurityContextHolderFilter   → empty SecurityContext for this request            │   │    ║
+║  │   │   HeaderWriterFilter            → security headers (X-Content-Type-Options, ...)    │   │    ║
+║  │   │   CorsFilter                    → answers OPTIONS preflight, checks Origin          │   │    ║
+║  │   │ ★ JWTFilter                     → reads Bearer token, builds UserPrincipal          │──►│ 401 JSON
+║  │   │   AnonymousAuthenticationFilter → nobody signed in? mark as "anonymous"             │   │    ║
+║  │   │   ExceptionTranslationFilter    → catches security exceptions from below:           │   │    ║
+║  │   │        anonymous user  → JsonAuthHandlers.unauthorized()  ──────────────────────────│──►│ 401 JSON
+║  │   │        signed-in user  → JsonAuthHandlers.forbidden()     ──────────────────────────│──►│ 403 JSON
+║  │   │   AuthorizationFilter           → applies the URL rules from SecurityConfig         │   │    ║
+║  │   │        permitAll / authenticated / hasRole("ADMIN")                                 │   │    ║
+║  │   └───────────────────────────────────────────────────────────────────┬──────────────────┘   │    ║
+║  └───────────────────────────────────────────────────────────────────────┼──────────────────────┘    ║
+║                                                                          ▼                           ║
+║  ┌──────────────────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │ 4. DISPATCHERSERVLET  (Spring MVC front controller — the only servlet)                       │    ║
+║  │                                                                                              │    ║
+║  │    HandlerMapping      → "POST /api/cart/" belongs to CartController.addToCart()             │    ║
+║  │    HandlerAdapter      → prepares the method arguments:                                     │    ║
+║  │        @RequestBody            → Jackson turns the JSON body into a CartItem object          │    ║
+║  │        @PathVariable/@RequestParam → read from the URL                                       │    ║
+║  │        @AuthenticationPrincipal → UserPrincipal taken from the SecurityContext               │    ║
+║  │    calls the controller method ──────────────────────────────┐                               │    ║
+║  │    HttpMessageConverter → turns the return value into JSON   │                               │    ║
+║  │    HandlerExceptionResolver → any exception goes to          │                               │    ║
+║  │        GlobalExceptionHandler (@RestControllerAdvice) ───────│─────────────────────────────►│ 4xx/5xx JSON
+║  └──────────────────────────────────────────────────────────────┼───────────────────────────────┘    ║
+║                                                                 ▼                                    ║
+║  ┌──────────────────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │ 5. APPLICATION CODE                                                                          │    ║
+║  │                                                                                              │    ║
+║  │    @RestController   CartController      → thin: reads input, calls the service             │    ║
+║  │          ▼                                                                                   │    ║
+║  │    @Service          CartService         → business rules, @Transactional, @Cacheable       │    ║
+║  │          ▼                                                                                   │    ║
+║  │    @Repository       CartItemRepository  → JPA / Hibernate SQL                              │    ║
+║  │          ▼                                                                                   │    ║
+║  │    HikariCP pool (max 20 connections) ─────────────────────────────►  MySQL (RDS)            │    ║
+║  └──────────────────────────────────────────────────────────────────────────────────────────────┘    ║
+║                                                                                                      ║
+║  If Tomcat itself hits an error outside Spring MVC → forwards to /error → CustomErrorController      ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+                                   │
+                                   │  HTTP 200 + JSON  (gzip if over 1 KB)
+                                   ▼
+                                 CLIENT
+```
+
+> [!NOTE]
+> The response travels back **up through the same filters** in reverse order. When it leaves, `SecurityContextHolderFilter` clears the SecurityContext, so nothing about the user stays on the thread. That's what "stateless" means in practice.
+
+### 12.2 Each layer in one sentence
+
+| Layer | What it is | Its job in this project |
+|---|---|---|
+| **Tomcat Connector** | Network listener inside the jar | Reads HTTP and gives each request its own virtual thread |
+| **Servlet filter chain** | Java `Filter`s that wrap every request | Encoding, form parsing, and handing over to Spring Security |
+| **`DelegatingFilterProxy`** | Bridge between Tomcat and Spring | Tomcat knows nothing about Spring beans. This one filter passes the request on to Spring Security's `FilterChainProxy`. |
+| **`SecurityFilterChain`** | The filters built in `SecurityConfig` | Decides *who you are* (JWTFilter) and *whether you may continue* (AuthorizationFilter) |
+| **`JWTFilter`** | Our custom `OncePerRequestFilter` | Bearer token → verified `UserPrincipal` in the SecurityContext, or JSON 401 |
+| **`AnonymousAuthenticationFilter`** | Spring default | If nobody is signed in, puts an "anonymous" user in the context so the rules always have someone to check |
+| **`ExceptionTranslationFilter`** | Spring default | Turns `AccessDeniedException` from the AuthorizationFilter into 401 (anonymous) or 403 (signed in) through `JsonAuthHandlers` |
+| **`AuthorizationFilter`** | Spring default | Checks the URL rules (`permitAll`, `authenticated`, `hasRole`) |
+| **`DispatcherServlet`** | Spring MVC front controller | Finds the controller method, prepares its arguments, writes the JSON result |
+| **Controller → Service → Repository** | Our code | Business logic, transactions, caching, SQL |
+| **`GlobalExceptionHandler`** | `@RestControllerAdvice` | Exceptions thrown in controllers or services → JSON errors |
+| **`CustomErrorController`** | `/error` endpoint | Last-resort JSON for errors outside Spring MVC |
+
+**The two key questions Spring Security asks:**
+
+1. **Authentication — "Who are you?"** → answered by `JWTFilter` (or nobody → anonymous).
+2. **Authorization — "Are you allowed here?"** → answered by `AuthorizationFilter` using the rules in `SecurityConfig`.
+
+### 12.3 Flow A — Public (permitted) endpoint
+
+Example: `POST /api/users/login` with **no** `Authorization` header. The rule for this URL is `.requestMatchers(HttpMethod.POST, "/api/users/login", "/api/users/register").permitAll()`.
+
+```
+CLIENT ──► Tomcat Connector ──► servlet filters ──► DelegatingFilterProxy ──► SecurityFilterChain
+                                                                                  │
+   ┌──────────────────────────────────────────────────────────────────────────────┘
+   ▼
+ CorsFilter ............ not a preflight → continue
+   ▼
+ JWTFilter ............. header is missing → filterChain.doFilter()  (does nothing, just passes)
+   ▼
+ AnonymousAuthFilter ... SecurityContext is empty → sets AnonymousAuthenticationToken
+   ▼
+ AuthorizationFilter ... POST /api/users/login matches permitAll()  → ✅ ALLOWED (even anonymous)
+   ▼
+ DispatcherServlet ..... HandlerMapping → UserController.login(@RequestBody User)
+   ▼                     Jackson: {"email":..,"password":..} → User DTO
+ UserController.login()
+   ▼
+ UserService.login()
+   ▼
+ AuthenticationManager → DaoAuthenticationProvider → MyUserDetailsService → MySQL (email index)
+   │                                                  → BCrypt compare
+   ├── wrong password → BadCredentialsException → GlobalExceptionHandler → 401 JSON
+   ▼
+ JWTService.generateToken(id, email, role)
+   ▼
+ 201 "eyJhbGciOi..."  ──► back up through the filters ──► CLIENT
+```
+
+**What to notice:**
+- `permitAll()` means "**no** login needed". It doesn't skip the filters. Every filter still runs, but none of them blocks the request.
+- On public endpoints, the **password check happens inside the controller/service** (`AuthenticationManager`), not in a filter. That's why a wrong password is handled by `GlobalExceptionHandler` and not by `JsonAuthHandlers`.
+- Other public endpoints: `POST /api/users/register`, `GET /actuator/health`, `/error`, and every `OPTIONS` preflight.
+
+> [!WARNING]
+> **A broken token still fails on a public endpoint.** `JWTFilter` runs on *every* URL. If a client sends an **expired** token to `/api/users/login`, the filter returns 401 before the permit rule is ever checked. Frontends should **not** attach the `Authorization` header to login or register calls (or should drop an expired token first).
+
+### 12.4 Flow B — Protected (authorized) endpoint, success
+
+Example: a customer calls `POST /api/cart/` with a valid token. The rule is `.anyRequest().authenticated()`.
+
+```
+CLIENT ──► Tomcat ──► servlet filters ──► DelegatingFilterProxy ──► SecurityFilterChain
+   ▼
+ CorsFilter ............ continue
+   ▼
+ JWTFilter
+   │  1. header = "Bearer eyJ..." → token = "eyJ..."
+   │  2. claims = jwtService.parse(token)       ← checks signature + expiry in ONE step
+   │  3. principal = UserPrincipal.fromToken(uid=7, sub="alice@example.com", role=CUSTOMER)
+   │                                            ← built from claims, NO database query
+   │  4. SecurityContextHolder.setAuthentication(principal, [ROLE_CUSTOMER])
+   │  5. filterChain.doFilter()
+   ▼
+ AnonymousAuthFilter ... context already has a user → does nothing
+   ▼
+ AuthorizationFilter ... POST /api/cart/ → anyRequest().authenticated()
+   │                     alice is authenticated → ✅ ALLOWED
+   ▼
+ DispatcherServlet
+   │  HandlerMapping  → CartController.addToCart(...)
+   │  arguments       → @AuthenticationPrincipal UserPrincipal  = alice (from SecurityContext)
+   │                    @RequestBody CartItem                   = { product:{id:1}, quantity:2 }
+   ▼
+ CartController.addToCart(principal, cartItem)
+   ▼
+ CartService.addToCart(principal.getId() = 7, cartItem)    ← user id from the TOKEN, never the body
+   │  @Transactional → borrow a connection from HikariCP
+   │  findByIdAndActiveTrue → findByUserIdAndProductId → stock check → save
+   ▼
+ 200 "Item added successfully" ──► back through the filters (context cleared) ──► CLIENT
+```
+
+**Admin-only endpoint, same flow:** for `POST /api/products/` the rule is `.hasRole("ADMIN")`. The AuthorizationFilter checks whether the principal's authorities contain `ROLE_ADMIN`. The `role` claim in the token became that authority in step 3.
+
+### 12.5 Flow C — Protected endpoint, rejected
+
+Each request below is stopped **before** the DispatcherServlet. The controller never runs.
+
+**C1. No token at all → 401 "Sign in to continue."**
+
+```
+JWTFilter ............. no header → pass
+AnonymousAuthFilter ... sets anonymous user
+AuthorizationFilter ... GET /api/cart/items needs authenticated() → anonymous ✗ → throws AccessDeniedException
+ExceptionTranslationFilter catches it → user is anonymous → AuthenticationEntryPoint
+   → JsonAuthHandlers.unauthorized() → 401 {"status":401,"error":"Unauthorized","message":"Sign in to continue.",...}
+```
+
+**C2. Expired, tampered, or garbage token → 401 "Your session has expired. Sign in again."**
+
+```
+JWTFilter ............. jwtService.parse() throws JwtException
+                        → JsonAuthHandlers.write(response, 401, "...")  → return   (chain STOPS here)
+(AuthorizationFilter, DispatcherServlet and the controller never run)
+```
+
+**C3. Old-format token for a deleted account → 401 "Your account could not be found."**
+
+```
+JWTFilter ............. token has no uid/role claims → loadUserByUsername() → UsernameNotFoundException
+                        → JsonAuthHandlers.write(response, 401, "...")  → return
+```
+
+**C4. Valid customer token on an admin URL → 403 "You don't have permission to do that."**
+
+```
+JWTFilter ............. ✅ principal = alice, ROLE_CUSTOMER
+AuthorizationFilter ... POST /api/products/ needs hasRole("ADMIN") → ✗ → AccessDeniedException
+ExceptionTranslationFilter → user IS authenticated → AccessDeniedHandler
+   → JsonAuthHandlers.forbidden() → 403 JSON
+```
+
+**C5. Valid token, but not your resource → 403, from the controller**
+
+```
+Filters ............... ✅ authenticated, GET /api/users/{id} only needs authenticated()
+DispatcherServlet ..... UserController.getUserById(id=9, principal=alice(id=7))
+requireSelfOrAdmin .... 7 ≠ 9 and not admin → throw ApiException.forbidden(...)
+GlobalExceptionHandler → 403 {"message":"You can only view or change your own account.",...}
+```
+
+C5 passes the filters because a URL rule can't know who owns record 9. Ownership is checked **inside** the controller, so the error comes from `GlobalExceptionHandler` and not from `JsonAuthHandlers`.
+
+### 12.6 Public vs protected — side by side
+
+| | Public (`permitAll`) | Protected (`authenticated` / `hasRole`) |
+|---|---|---|
+| Examples | `POST /api/users/login`, `/register`, `GET /actuator/health`, `OPTIONS /**` | `/api/cart/**`, `/api/order/**`, `/api/users/me`, admin product routes |
+| Token needed? | No | Yes, `Authorization: Bearer <jwt>` |
+| Does `JWTFilter` run? | Yes, but with no header it just passes | Yes, and builds the `UserPrincipal` |
+| Who is in the SecurityContext? | `AnonymousAuthenticationToken` | `UserPrincipal` (id, email, role) |
+| AuthorizationFilter decision | Always allow | Allow only if authenticated (and has the role) |
+| `@AuthenticationPrincipal` in controller | `null` | The signed-in user |
+| Who rejects bad requests? | Controller/service → `GlobalExceptionHandler` | Filters → `JsonAuthHandlers` (401/403), then controller → `GlobalExceptionHandler` |
+| Database hit for auth? | Login: yes (password check). Register: no. | **No** (claims are trusted after the signature check) |
+
+**Who answers which error:**
+
+```
+           ┌───────────── inside Spring Security (before DispatcherServlet) ─────────────┐
+ bad token │ JWTFilter ─────────────────────────► JsonAuthHandlers.write()       → 401     │
+ no login  │ AuthorizationFilter → ExceptionTranslationFilter → unauthorized()  → 401     │
+ wrong role│ AuthorizationFilter → ExceptionTranslationFilter → forbidden()     → 403     │
+           └─────────────────────────────────────────────────────────────────────────────┘
+           ┌───────────── inside Spring MVC (after DispatcherServlet) ───────────────────┐
+ business  │ Controller / Service throws ApiException ──► GlobalExceptionHandler → 4xx    │
+ crash     │ any other exception ───────────────────────► GlobalExceptionHandler → 500    │
+           └─────────────────────────────────────────────────────────────────────────────┘
+           ┌───────────── outside both ──────────────────────────────────────────────────┐
+ fallback  │ Tomcat forwards to /error ─────────────────► CustomErrorController → JSON   │
+           └─────────────────────────────────────────────────────────────────────────────┘
+```
+
+> [!TIP]
+> **Why `JWTFilter` runs only once:** it's a `@Component`, so Spring Boot *also* registers it as a normal Tomcat servlet filter, in addition to its place in the security chain. Because it extends `OncePerRequestFilter`, the second call sees a "this filter already ran" flag on the request and skips itself. To avoid the duplicate registration entirely, you can add a `FilterRegistrationBean<JWTFilter>` with `setEnabled(false)`.
+
+### 12.7 Register — `POST /api/users/register` (public)
 
 ```
 JWTFilter: no header → pass   →   URL is permitAll   →   UserController.createUser
@@ -510,7 +774,7 @@ UserService.createUser  (@Transactional)
 
 > The response key is `student` for backwards compatibility with the existing frontend.
 
-### 12.2 Login — `POST /api/users/login` (public)
+### 12.8 Login — `POST /api/users/login` (public)
 
 ```
 AuthenticationManager → DaoAuthenticationProvider → MyUserDetailsService.loadUserByUsername(email)
@@ -520,7 +784,7 @@ AuthenticationManager → DaoAuthenticationProvider → MyUserDetailsService.loa
 201 → "eyJhbGciOi…"   (the body is the raw token string)
 ```
 
-### 12.3 Protected request — `GET /api/cart/items`
+### 12.9 Protected request — `GET /api/cart/items`
 
 ```
 JWTFilter: parse token (signature + expiry) → UserPrincipal.fromToken(...)   [no DB]
@@ -531,7 +795,7 @@ CartService.getCart(principal.getId())   (@Transactional(readOnly = true))
 200 → [ { id, user: {id, firstName, lastName, email}, product: {...}, quantity, price } ]
 ```
 
-### 12.4 Add to cart — `POST /api/cart/`
+### 12.10 Add to cart — `POST /api/cart/`
 
 ```
 validate product id + quantity ≥ 1
@@ -542,7 +806,7 @@ new line? user = getReferenceById(userId)            → sets the FK without loa
 line.quantity += quantity; line.price = price × quantity; save
 ```
 
-### 12.5 Checkout — `POST /api/order/` (one transaction)
+### 12.11 Checkout — `POST /api/order/` (one transaction)
 
 ```
 @Transactional createOrder(userId)

@@ -55,7 +55,7 @@ spring:
 
 jwt:
   # Base64 string of at least 32 random bytes. Generate one with:  openssl rand -base64 32
-  secret: 
+  secret: !
 
 imagekit:
   # From the ImageKit dashboard: Developer options > API keys. Keep it secret.

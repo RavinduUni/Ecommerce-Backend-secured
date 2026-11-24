@@ -1,1353 +1,1117 @@
-# 🛒 Ecommerce Backend — Spring Boot + JWT Security
+# 🛒 Ecommerce Backend — Spring Boot 4 + JWT Security
 
-A production-style REST API for an e-commerce platform, secured with stateless JWT authentication and role-based access control. Built with Spring Boot 4, Spring Security, Spring Data JPA, MySQL, MapStruct, and JJWT.
+A production-style REST API for an e-commerce shop. It has stateless JWT login, role-based access, a paged and searchable product catalog, in-memory caching, Flyway database migrations, ImageKit image uploads, and the same JSON error format everywhere. It runs on Java 21 virtual threads.
+
+Built with **Spring Boot 4.1 · Spring Security · Spring Data JPA (Hibernate) · MySQL · Flyway · Caffeine · MapStruct · JJWT · ImageKit**.
 
 ---
 
 ## 📑 Table of Contents
 
 1. [Project Overview](#1-project-overview)
-2. [Tech Stack & Dependencies](#2-tech-stack--dependencies)
-3. [Project Structure](#3-project-structure)
-4. [Domain Model & Database Schema](#4-domain-model--database-schema)
-5. [The Big Picture — What Happens to Every Request?](#5-the-big-picture--what-happens-to-every-request)
-6. [Layer by Layer — The Spring Security Filter Chain](#6-layer-by-layer--the-spring-security-filter-chain)
-7. [Role-Based Access Control (RBAC)](#7-role-based-access-control-rbac)
-8. [Detailed Flow: Registering a User (POST /api/users/register)](#8-detailed-flow-registering-a-user-post-apiusersregister)
-9. [Detailed Flow: Logging In (POST /api/users/login)](#9-detailed-flow-logging-in-post-apiuserslogin)
-10. [Detailed Flow: Accessing a Protected Endpoint](#10-detailed-flow-accessing-a-protected-endpoint)
-11. [Detailed Flow: Placing an Order (POST /api/order/)](#11-detailed-flow-placing-an-order-post-apiorder)
-12. [Class-by-Class Breakdown](#12-class-by-class-breakdown)
-13. [Method-by-Method: JWTService](#13-method-by-method-jwtservice)
-14. [Error Handling — End-to-End](#14-error-handling--end-to-end)
-15. [Stateful (Session) vs Stateless (JWT) Security](#15-stateful-session-vs-stateless-jwt-security)
-16. [CORS Configuration](#16-cors-configuration)
-17. [MapStruct — Entity ↔ DTO Mapping](#17-mapstruct--entity--dto-mapping)
-18. [Concurrency & Stock Safety](#18-concurrency--stock-safety)
-19. [Configuration Reference (application.yml)](#19-configuration-reference-applicationyml)
-20. [Complete API Reference](#20-complete-api-reference)
-21. [How to Run Locally](#21-how-to-run-locally)
-22. [Quick Reference: Postman Walkthrough](#22-quick-reference-postman-walkthrough)
+2. [What's New — Summary of Recent Updates](#2-whats-new--summary-of-recent-updates)
+3. [Tech Stack & Dependencies](#3-tech-stack--dependencies)
+4. [Project Structure](#4-project-structure)
+5. [Domain Model & Database Schema](#5-domain-model--database-schema)
+6. [The Big Picture — What Happens to Every Request?](#6-the-big-picture--what-happens-to-every-request)
+7. [Security Configuration (`SecurityConfig`)](#7-security-configuration-securityconfig)
+8. [JWT Authentication — Tokens Without a Database Lookup](#8-jwt-authentication--tokens-without-a-database-lookup)
+9. [JSON Error Handling Inside the Security Filter (`JsonAuthHandlers`)](#9-json-error-handling-inside-the-security-filter-jsonauthhandlers)
+10. [Global Exception Handling](#10-global-exception-handling)
+11. [Role-Based Access Control (RBAC)](#11-role-based-access-control-rbac)
+12. [Request Flows Step by Step](#12-request-flows-step-by-step)
+13. [Product Catalog — Paging, Full-Text Search, Sorting](#13-product-catalog--paging-full-text-search-sorting)
+14. [Caching (Caffeine)](#14-caching-caffeine)
+15. [Database Query Optimization](#15-database-query-optimization)
+16. [Database Migrations (Flyway)](#16-database-migrations-flyway)
+17. [Virtual Threads & Server Tuning](#17-virtual-threads--server-tuning)
+18. [Product Image Uploads (ImageKit)](#18-product-image-uploads-imagekit)
+19. [DTOs, Records & MapStruct](#19-dtos-records--mapstruct)
+20. [Concurrency & Stock Safety](#20-concurrency--stock-safety)
+21. [Class-by-Class Reference](#21-class-by-class-reference)
+22. [Configuration Reference (`application.yml`)](#22-configuration-reference-applicationyml)
+23. [Complete API Reference](#23-complete-api-reference)
+24. [How to Run Locally](#24-how-to-run-locally)
+25. [Postman Walkthrough](#25-postman-walkthrough)
+26. [Known Issues & Next Steps](#26-known-issues--next-steps)
 
 ---
 
 ## 1. Project Overview
 
-This is a full-featured e-commerce REST API. Users can register, log in, browse products, manage a shopping cart, and place orders. Administrators get extra powers: manage all users, all products, and view the full cart across all users.
+Customers can register, sign in, browse and search products, manage a cart, and check out. Admins can also manage products (including image uploads), see every user and every open cart, and read system info.
 
-**Key design decisions:**
-- **Stateless JWT auth** — the server never stores session state; every request is self-contained.
-- **Role-based access** — `CUSTOMER` and `ADMIN` roles enforced at the URL level in `SecurityConfig`, with fine-grained ownership checks in controllers.
-- **Consistent JSON errors** — every error, whether from a filter, controller, or unexpected crash, comes back as the same `ApiError` JSON shape.
-- **Safe checkout** — stock is decremented with an atomic SQL `UPDATE … WHERE stock >= qty`, so two users can't buy the last item simultaneously.
-- **DTO/Entity separation** — MapStruct mappers translate between JPA entities (the database layer) and plain DTO objects (the API layer). Sensitive fields like `password` are write-only in DTOs.
+**Main design decisions:**
+
+| Decision | Why it matters |
+|---|---|
+| **Stateless JWT** | The server stores no sessions. Each request carries a signed token, so any server instance can handle it. |
+| **User id and role inside the token** | The JWT filter builds the signed-in user from the token alone. Normal requests don't touch the database for authentication. |
+| **Role-based access** | URL rules in `SecurityConfig`, plus "own account only" checks in controllers. |
+| **One JSON error format** | Filters, controllers, and Tomcat's `/error` page all return `{ status, error, message, timestamp }`. |
+| **Safe checkout** | Stock goes down with one atomic `UPDATE … WHERE stock >= qty`, so two buyers can't both get the last item. |
+| **Flyway owns the schema** | Hibernate no longer changes tables. Every schema change is a versioned SQL file. |
+| **Cached catalog** | Product reads come from memory for up to 30 s. Admin edits clear the cache straight away. |
+| **Optimized queries** | `JOIN FETCH`, lazy relations, batch fetching, bulk deletes, and the right indexes. No N+1 queries on the hot paths. |
+| **Virtual threads** | Waiting on MySQL or ImageKit doesn't hold an OS thread, so the server handles more requests at once. |
 
 ---
 
-## 2. Tech Stack & Dependencies
+## 2. What's New — Summary of Recent Updates
+
+| Area | What changed | Main files |
+|---|---|---|
+| 🔐 **Security config** | Stateless, CSRF/form login/basic auth turned off, URL role rules, CORS from an env var, JSON 401/403 handlers | `SecurityConfig`, `JsonAuthHandlers` |
+| 🎫 **JWT** | Token now carries `uid` and `role`. One `parse()` checks signature and expiry. Signing key built once at startup. Older tokens fall back to a database lookup. | `JWTService`, `JWTFilter`, `UserPrincipal` |
+| 🧯 **Filter error handling** | Bad or expired tokens get a JSON 401 straight from the filter instead of an HTML page or stack trace | `JWTFilter`, `JsonAuthHandlers`, `ApiError.toJson()` |
+| 🚨 **Global exception handling** | `@RestControllerAdvice` maps business, auth, validation, upload, data-integrity, and pool-exhaustion errors to clean JSON | `GlobalExceptionHandler`, `ApiException`, `ApiError`, `CustomErrorController` |
+| ⚡ **Caching** | Caffeine cache for catalog pages, categories, single products, and active products. Cleared on every product write. | `CacheConfig`, `ProductService` |
+| 🔎 **Catalog API** | New paged endpoint with category filter, MySQL full-text search, whitelisted sorting, and category counts | `ProductCatalogRepository`, `CatalogQuery`, `PageResponse`, `CategoryCount` |
+| 🗄️ **Query optimization** | `JOIN FETCH`, `LAZY` relations, `default_batch_fetch_size`, `getReferenceById`, bulk `DELETE`, `readOnly` transactions, `open-in-view: false`, HikariCP limits | Repositories, entities, `application.yml` |
+| 🧱 **DB migrations** | Flyway with V1 to V4: base schema, wider columns, indexes, full-text index, unique email, unique cart line | `db/migration/*.sql` |
+| 🧵 **Virtual threads** | `spring.threads.virtual.enabled: true` | `application.yml` |
+| 🖼️ **Image upload** | Multipart upload to ImageKit with size, type, and magic-byte checks. Old file deleted after a successful save. | `ImageKitConfig`, `ImageUploadService`, `ProductController` |
+| 📦 **Lighter responses** | `UserSummary` in cart and order responses instead of the full user. Gzip compression. | `UserSummary`, `CartItemMapper`, `OrderMapper` |
+| 🛡️ **Account safety** | Register always creates a `CUSTOMER`. Email and password validated. Duplicate email → 409. Password never returned. Only admins can change roles. | `UserService`, `User` DTO |
+
+---
+
+## 3. Tech Stack & Dependencies
 
 | Dependency | Purpose |
 |---|---|
-| Spring Boot 4.1 | Application framework and auto-configuration |
+| Spring Boot 4.1 (`starter-web`) | Web framework, embedded Tomcat |
 | Spring Security | Filter chain, authentication, authorization |
-| Spring Data JPA | Repository abstraction over Hibernate/MySQL |
-| MySQL (`mysql-connector-j`) | Relational database |
-| JJWT 0.13 (`jjwt-api`, `jjwt-impl`, `jjwt-jackson`) | JWT creation, signing, and parsing |
-| Lombok 1.18 | Boilerplate reduction (`@Data`, `@Builder`, etc.) |
-| MapStruct 1.5 | Compile-time Entity ↔ DTO mapping |
-| Spring Boot Actuator | `/actuator/health` and `/actuator/info` endpoints |
-| Java 21 | LTS runtime |
+| Spring Data JPA / Hibernate | Repositories and ORM over MySQL |
+| MySQL (`mysql-connector-j`) | Relational database (AWS RDS in production) |
+| **Flyway** (`spring-boot-starter-flyway`, `flyway-mysql`) | Versioned database migrations |
+| **Spring Cache + Caffeine** | Fast in-memory cache for product reads |
+| JJWT 0.13 (`api`, `impl`, `jackson`) | Creating, signing, and parsing JWTs |
+| **ImageKit Java SDK 3.7** | Product image hosting and CDN |
+| MapStruct 1.5 | Entity ↔ DTO mapping, generated at compile time |
+| Lombok 1.18 | Less boilerplate (`@Data`, getters and setters) |
+| Spring Boot Actuator | `/actuator/health` and `/actuator/info` |
+| Java 21 | LTS runtime with **virtual threads** |
 
 ---
 
-## 3. Project Structure
+## 4. Project Structure
 
 ```
 src/main/java/com/ecom/
 │
-├── Main.java                         ← Spring Boot entry point
+├── Main.java                              ← Spring Boot entry point
 │
 ├── config/
-│   └── SecurityConfig.java           ← Security rules, filter chain, CORS, beans
+│   ├── SecurityConfig.java                ← Filter chain, URL rules, CORS, password encoder
+│   ├── CacheConfig.java          🆕       ← @EnableCaching + cache name constants
+│   └── ImageKitConfig.java       🆕       ← ImageKit client bean (timeout, retries)
 │
 ├── filter/
-│   └── JWTFilter.java                ← Runs on every request; validates JWT
+│   └── JWTFilter.java                     ← Reads and validates the JWT on every request
 │
 ├── security/
-│   └── JsonAuthHandlers.java         ← JSON responses for 401 / 403 from filters
+│   └── JsonAuthHandlers.java     🆕       ← JSON 401/403 responses from the security layer
 │
 ├── controller/
-│   ├── UserController.java           ← /api/users/**
-│   ├── ProductController.java        ← /api/products/**
-│   ├── CartController.java           ← /api/cart/**
-│   ├── OrderController.java          ← /api/order/**
-│   ├── SystemController.java         ← /api/system/** (admin)
-│   └── CustomErrorController.java    ← /error fallback
+│   ├── UserController.java                ← /api/users/**
+│   ├── ProductController.java             ← /api/products/** (+ catalog, categories, image)
+│   ├── CartController.java                ← /api/cart/**
+│   ├── OrderController.java               ← /api/order/**
+│   ├── SystemController.java              ← /api/system/** (admin)
+│   └── CustomErrorController.java         ← /error fallback, always JSON
 │
 ├── service/
-│   ├── UserService.java              ← Registration, login, user CRUD
-│   ├── ProductService.java           ← Product CRUD + search + soft-delete
-│   ├── CartService.java              ← Add/remove cart items, stock check
-│   ├── OrderService.java             ← Checkout: cart → order + stock decrement
-│   ├── JWTService.java               ← Token generation, parsing, validation
-│   └── MyUserDetailsService.java     ← Spring Security user loader (by email)
+│   ├── UserService.java                   ← Register, login, profile updates
+│   ├── ProductService.java                ← Product CRUD, catalog, caching
+│   ├── CartService.java                   ← Add/remove items, stock checks
+│   ├── OrderService.java                  ← Checkout (cart → order) in one transaction
+│   ├── ImageUploadService.java   🆕       ← Validates and uploads images to ImageKit
+│   ├── JWTService.java                    ← Token creation and parsing
+│   └── MyUserDetailsService.java          ← Loads users by email for sign-in
 │
-├── dto/                              ← API-facing objects (never expose entities)
-│   ├── User.java
-│   ├── UserPrincipal.java            ← Spring Security UserDetails wrapper
-│   ├── Product.java
-│   ├── CartItem.java
-│   ├── Order.java
-│   ├── OrderItem.java
-│   └── Address.java
-│
-├── entity/                           ← JPA entities (database tables)
-│   ├── UserEntity.java
-│   ├── ProductEntity.java
-│   ├── CartItemEntity.java
-│   ├── OrderEntity.java
-│   ├── OrderItemEntity.java
-│   └── AddressEntity.java
-│
-├── enums/
-│   ├── UserRole.java                 ← CUSTOMER, ADMIN
-│   └── OrderStatus.java              ← PENDING, CONFIRMED, SHIPPED, DELIVERED
-│
-├── mapper/                           ← MapStruct interfaces (compile-time generated)
-│   ├── UserMapper.java
-│   ├── ProductMapper.java
-│   ├── CartItemMapper.java
-│   └── OrderMapper.java
-│
-├── repository/                       ← Spring Data JPA repositories
+├── repository/
 │   ├── UserRepository.java
-│   ├── ProductRepository.java
-│   ├── CartItemRepository.java
+│   ├── ProductRepository.java             ← + atomic stock decrement, category counts
+│   ├── ProductCatalogRepository.java 🆕   ← Native SQL: paging + full-text search + sort
+│   ├── CartItemRepository.java            ← + JOIN FETCH queries, bulk deletes
 │   └── OrderRepository.java
 │
+├── dto/                                   ← What the API sends and receives
+│   ├── User.java · Address.java · Product.java
+│   ├── CartItem.java · Order.java · OrderItem.java
+│   ├── UserPrincipal.java                 ← Signed-in user (built from DB or from JWT)
+│   ├── UserSummary.java          🆕       ← Small user object for carts and orders
+│   ├── CatalogQuery.java         🆕       ← Cleaned catalog params (also the cache key)
+│   ├── PageResponse.java         🆕       ← One page of results
+│   ├── CategoryCount.java        🆕       ← { name, count }
+│   └── UploadedImage.java        🆕       ← { url, fileId } from ImageKit
+│
+├── entity/                                ← JPA entities (database tables)
+│   ├── UserEntity.java · AddressEntity.java · ProductEntity.java
+│   └── CartItemEntity.java · OrderEntity.java · OrderItemEntity.java
+│
+├── enums/
+│   ├── UserRole.java                      ← CUSTOMER, ADMIN
+│   └── OrderStatus.java                   ← PENDING, CONFIRMED, SHIPPED, DELIVERED
+│
+├── mapper/                                ← MapStruct interfaces
+│   ├── UserMapper.java · ProductMapper.java
+│   └── CartItemMapper.java · OrderMapper.java
+│
 └── exception/
-    ├── ApiException.java             ← Business exceptions with HTTP status
-    ├── ApiError.java                 ← Uniform JSON error response shape
-    └── GlobalExceptionHandler.java   ← @RestControllerAdvice — maps all exceptions
+    ├── ApiException.java         🆕       ← Business error with an HTTP status
+    ├── ApiError.java             🆕       ← The JSON error body (record)
+    └── GlobalExceptionHandler.java 🆕     ← Maps every exception to JSON
+
+src/main/resources/
+├── application.yml
+└── db/migration/                 🆕       ← Flyway scripts
+    ├── V1__initial_schema.sql
+    ├── V2__columns_and_indexes.sql
+    ├── V3__unique_email.sql
+    └── V4__unique_cart_line.sql
 ```
 
 ---
 
-## 4. Domain Model & Database Schema
+## 5. Domain Model & Database Schema
 
 ```
-+------------------+        +------------------+        +------------------+
-|   UserEntity     |        | CartItemEntity   |        |  ProductEntity   |
-|------------------|1     * |------------------|*     1 |------------------|
-| id (PK)          +--------+ id (PK)          +--------+ id (PK)          |
-| firstName        |        | user_id (FK)     |        | name             |
-| lastName         |        | product_id (FK)  |        | description      |
-| email            |        | quantity         |        | price            |
-| password         |        | price            |        | stockQuantity    |
-| phone            |        | createdAt        |        | category         |
-| role             |        | updatedAt        |        | imageUrl         |
-| address_id (FK)  |        +------------------+        | active           |
-| createdAt        |                                    +------------------+
-| updatedAt        |
-+--------+---------+
-         |
-         | 1
-         |                +------------------+
-         |                |   OrderEntity    |
-         |1             * |------------------|
-         +----------------+ id (PK)          |       +--------------------+
-                          | user_id (FK)     |1    * |  OrderItemEntity   |
-                          | totalAmount      +-------+-------------------|
-                          | status           |       | id (PK)            |
-                          | createdAt        |       | product_id (FK)    |
-                          | updatedAt        |       | order_id (FK)      |
-                          +------------------+       | quantity           |
-                                                     | price              |
-+------------------+                                 +--------------------+
-|  AddressEntity   |
-|------------------|
-| id (PK)          |  <-- 1:1 with UserEntity (cascade ALL, orphan removal)
-| street           |
-| city             |
-| state            |
-| country          |
-| zipcode          |
++------------------+        +--------------------+        +--------------------+
+|   user_entity    |        |  cart_item_entity  |        |      products      |
+|------------------|1     * |--------------------|*     1 |--------------------|
+| id (PK)          +--------+ id (PK)            +--------+ id (PK)            |
+| first_name       |        | user_id (FK)       |        | name               |
+| last_name        |        | product_id (FK)    |        | description (TEXT) |
+| email  (UNIQUE)  |        | quantity           |        | price              |
+| password (BCrypt)|        | price              |        | stock_quantity     |
+| phone            |        | created_at         |        | category           |
+| role             |        | updated_at         |        | image_url          |
+| address_id (FK)  |        | UNIQUE(user_id,    |        | image_file_id      |
+| created_at       |        |        product_id) |        | active             |
+| updated_at       |        +--------------------+        | created_at         |
++--------+---------+                                      | updated_at         |
+         | 1                                              +--------------------+
+         |              +------------------+
+         |1           * |   order_entity   |1     * +--------------------+
+         +--------------+ id (PK)          +--------+ order_item_entity  |
+                        | user_id (FK)     |        | id (PK)            |
+                        | total_amount     |        | order_id (FK)      |
+                        | status           |        | product_id (FK)    |
+                        | created_at       |        | quantity           |
+                        | updated_at       |        | price              |
+                        +------------------+        +--------------------+
+
++------------------+
+|   user_address   |  ← optional 1:1 with user_entity (cascade ALL, orphan removal, LAZY)
+| id, street, city, state, country, zipcode |
 +------------------+
 ```
 
-**Key relationships:**
-- `UserEntity` has an optional 1:1 `AddressEntity` (cascade ALL, orphan removal).
-- `CartItemEntity` is a many-to-many join table between `UserEntity` and `ProductEntity`, enriched with `quantity` and `price`.
-- `OrderEntity` owns a list of `OrderItemEntity` (cascade ALL, orphan removal).
-- Orders reference a `UserEntity` (many-to-one) and each `OrderItemEntity` references a `ProductEntity`.
+**Indexes and constraints (added by Flyway):**
 
----
-
-## 5. The Big Picture — What Happens to Every Request?
-
-Think of the application as a building with a layered security checkpoint. Every HTTP request must pass through each checkpoint in order.
-
-```
-CLIENT (Browser / Postman / Mobile App)
-         |
-         |  HTTP Request
-         |  (with or without "Authorization: Bearer <token>")
-         v
-+-------------------------------------------------------------+
-|                  SERVLET CONTAINER (Tomcat)                  |
-|                                                             |
-|  +------------------------------------------------------+   |
-|  |            SPRING SECURITY FILTER CHAIN              |   |
-|  |                                                      |   |
-|  |  1. CorsFilter          <- checks browser CORS rules |   |
-|  |  2. >>> JWTFilter <<<   <- OUR custom filter         |   |
-|  |  3. UsernamePasswordAuthenticationFilter (bypassed)  |   |
-|  |  4. ExceptionTranslationFilter                       |   |
-|  |  5. AuthorizationFilter <- checks URL permissions    |   |
-|  +------------------------------------------------------+   |
-|                          |                                  |
-|                          v                                  |
-|          DispatcherServlet (Spring MVC front controller)     |
-|                          |                                  |
-|                          v                                  |
-|          @RestController (business logic)                    |
-|    UserController / ProductController / CartController ...   |
-+-------------------------------------------------------------+
-         |
-         |  HTTP Response (JSON data or JWT token)
-         v
-CLIENT
-```
-
-**Key rule:** If any filter rejects the request (bad token → 401, wrong role → 403), the request **stops immediately** and never reaches the DispatcherServlet or any controller.
-
----
-
-## 6. Layer by Layer — The Spring Security Filter Chain
-
-### What is a Filter?
-
-A `Filter` is code that wraps every request and response. Spring Security builds a chain of them. Each filter either:
-- **Passes through** → calls `filterChain.doFilter(request, response)` to hand off to the next filter.
-- **Stops the request** → writes a response directly (e.g., 401 Unauthorized) and returns without calling `doFilter`.
-
-### The Filters in This Application
-
-```
-Request
-  -> [CorsFilter]        Handles browser preflight OPTIONS; rejects cross-origin requests
-  -> [JWTFilter]         Reads "Authorization: Bearer …"; validates token; populates SecurityContext
-  -> [AuthorizationFilter] Checks the SecurityContext: does this user have permission?
-  -> DispatcherServlet
-```
-
-### How `filterChain.doFilter()` Works
-
-```java
-// Inside JWTFilter — the two code paths:
-
-// Path 1: No token header -> pass through without setting auth
-if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-    filterChain.doFilter(request, response); // <- "pass it on"
-    return;
-}
-
-// Path 2: Bad/expired token -> STOP, write 401, never call doFilter
-try {
-    userName = jwtService.extractUserName(token);
-} catch (JwtException e) {
-    JsonAuthHandlers.write(response, HttpStatus.UNAUTHORIZED, "Your session has expired.");
-    return; // <- "stop here, controller never sees this request"
-}
-```
-
-### The DispatcherServlet
-
-After all security filters pass, the **DispatcherServlet** acts as a "traffic director":
-
-```
-DispatcherServlet receives request
-         |
-         v  Looks at URL and HTTP method (e.g. GET /api/products/active)
-         |
-         v  Finds matching @Controller method via HandlerMapping
-         |
-         v  Calls that controller method
-         |
-         v  Converts return value to JSON (via Jackson/HttpMessageConverter)
-         |
-         v  HTTP Response -> Client
-```
-
----
-
-## 7. Role-Based Access Control (RBAC)
-
-The application has two roles: `CUSTOMER` (the default) and `ADMIN`.
-
-### How Roles are Stored
-
-```java
-// UserRole.java
-public enum UserRole { CUSTOMER, ADMIN; }
-
-// UserEntity.java
-@Enumerated(EnumType.STRING)
-private UserRole role = UserRole.CUSTOMER; // default for every new user
-```
-
-### How Roles are Exposed to Spring Security
-
-`UserPrincipal` wraps a `UserEntity` and implements `UserDetails`. It prefixes the role name with `ROLE_` as required by Spring Security:
-
-```java
-// UserPrincipal.java
-@Override
-public Collection<? extends GrantedAuthority> getAuthorities() {
-    UserRole role = user.getRole() != null ? user.getRole() : UserRole.CUSTOMER;
-    return List.of(new SimpleGrantedAuthority("ROLE_" + role.name()));
-    // -> "ROLE_CUSTOMER" or "ROLE_ADMIN"
-}
-```
-
-### URL-Level Permission Rules (`SecurityConfig`)
-
-```java
-http.authorizeHttpRequests(auth -> auth
-    // Allow browser preflight
-    .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-
-    // Public — no token needed
-    .requestMatchers(HttpMethod.POST, "/api/users/login", "/api/users/register").permitAll()
-    .requestMatchers("/error", "/actuator/health").permitAll()
-
-    // Admin only
-    .requestMatchers("/actuator/**", "/api/system/**").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.GET, "/api/users/").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.GET, "/api/cart/").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.GET, "/api/products/").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.POST, "/api/products/**").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.PUT, "/api/products/**").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.DELETE, "/api/products/**").hasRole("ADMIN")
-
-    // Everything else needs any authenticated user
-    .anyRequest().authenticated()
-)
-```
-
-### Fine-Grained Ownership Checks in Controllers
-
-Some rules can't be expressed as URL patterns. Users can only view/update **their own** account (unless admin):
-
-```java
-// UserController.java
-@GetMapping("/{id}")
-public ResponseEntity<User> getUserById(@PathVariable Long id,
-                                        @AuthenticationPrincipal UserPrincipal principal) {
-    requireSelfOrAdmin(id, principal); // throws 403 if accessing someone else's account
-    return ResponseEntity.ok(userService.getUserById(id));
-}
-
-private void requireSelfOrAdmin(Long id, UserPrincipal principal) {
-    if (!principal.isAdmin() && !principal.getId().equals(id)) {
-        throw ApiException.forbidden("You can only view or change your own account.");
-    }
-}
-```
-
-### Role Escalation Protection
-
-New users are **always** registered as `CUSTOMER`:
-
-```java
-// UserService.java
-user.setRole(UserRole.CUSTOMER); // never trust a role sent by the client
-```
-
-The update endpoint silently strips any role field sent by a non-admin:
-
-```java
-if (!callerIsAdmin) {
-    updatedUser.setRole(null); // role changes need admin
-}
-```
-
----
-
-## 8. Detailed Flow: Registering a User (POST /api/users/register)
-
-This endpoint is public — no token required.
-
-**Request:**
-```json
-POST /api/users/register
-Content-Type: application/json
-
-{
-  "firstName": "Alice",
-  "lastName":  "Smith",
-  "email":     "alice@example.com",
-  "password":  "secret123",
-  "phone":     "0771234567"
-}
-```
-
-**Step-by-step:**
-
-```
-1. Request hits Tomcat
-   |
-2. JWTFilter runs
-   +-- No "Authorization" header found
-   +-- Calls filterChain.doFilter() -> passes through [OK]
-   |
-3. AuthorizationFilter runs
-   +-- URL "/api/users/register" is in permitAll() list
-   +-- Allowed [OK]
-   |
-4. DispatcherServlet -> UserController.createUser()
-   |
-5. UserService.createUser(user)
-   +-- Validates email format (regex check)
-   +-- Validates password length (minimum 6 chars)
-   +-- Validates firstName is not blank
-   +-- Checks for duplicate email -> throws 409 CONFLICT if taken
-   +-- Forces role = CUSTOMER (ignores any client-supplied role)
-   +-- BCrypt-encodes password: "secret123" -> "$2a$10$Kx3B..."
-   +-- Saves UserEntity to MySQL
-   |
-6. JWTService.generateToken("alice@example.com")
-   +-- Creates signed JWT (expires in 30 minutes)
-   |
-7. Response: 201 CREATED
-```
-
-**Response:**
-```json
-{
-  "student": {
-    "id": 1,
-    "firstName": "Alice",
-    "lastName": "Smith",
-    "email": "alice@example.com",
-    "phone": "0771234567",
-    "role": "CUSTOMER"
-  },
-  "token": "eyJhbGciOiJIUzI1NiJ9..."
-}
-```
-
-> **Note:** The `password` field uses `@JsonProperty(access = JsonProperty.Access.WRITE_ONLY)` on the `User` DTO, so it is accepted in requests but **never serialized into responses**. You will never see a password hash in an API response.
-
----
-
-## 9. Detailed Flow: Logging In (POST /api/users/login)
-
-**Request:**
-```json
-POST /api/users/login
-Content-Type: application/json
-
-{
-  "email":    "alice@example.com",
-  "password": "secret123"
-}
-```
-
-**Step-by-step:**
-
-```
-1. JWTFilter: no Authorization header -> passes through [OK]
-   |
-2. AuthorizationFilter: "/api/users/login" in permitAll() -> allowed [OK]
-   |
-3. DispatcherServlet -> UserController.login()
-   |
-4. UserService.login(user)
-   |
-5. AuthenticationManager.authenticate(
-       new UsernamePasswordAuthenticationToken("alice@example.com", "secret123")
-   )
-   |
-6. DaoAuthenticationProvider delegates to MyUserDetailsService
-   +-- Calls loadUserByUsername("alice@example.com")
-   +-- SELECT * FROM user_entity WHERE email = 'alice@example.com'
-   +-- Returns UserPrincipal(alice)
-   +-- Compares "secret123" with BCrypt hash from DB
-       +-- Match    -> Authentication succeeds [OK]
-       +-- No match -> throws BadCredentialsException -> 401
-   |
-7. JWTService.generateToken("alice@example.com")
-   |
-8. Response: 201 CREATED
-   Body: "eyJhbGciOiJIUzI1NiJ9..."
-```
-
-The client **must save this token** and include it in every subsequent request to protected endpoints.
-
----
-
-## 10. Detailed Flow: Accessing a Protected Endpoint
-
-Example: getting your own cart items.
-
-**Request:**
-```
-GET /api/cart/items
-Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
-```
-
-**Step-by-step:**
-
-```
-1. Request hits Tomcat
-   |
-2. JWTFilter.doFilterInternal() runs:
-   |
-   a) Read header: "Authorization: Bearer eyJ..."
-   b) Extract token = "eyJhbGciOiJIUzI1NiJ9..."
-   c) Try to extract username:
-      jwtService.extractUserName(token)
-        -> decodes JWT payload
-        -> reads "sub" claim -> "alice@example.com"
-      If the token is malformed or the signature doesn't match:
-        -> JwtException caught -> 401 "Your session has expired." [STOPS HERE]
-   |
-   d) userName = "alice@example.com"
-      SecurityContext has no existing auth (stateless)
-   |
-   e) Load user from DB:
-      MyUserDetailsService.loadUserByUsername("alice@example.com")
-        -> SELECT from DB -> UserPrincipal(alice)
-      If account deleted after token was issued:
-        -> UsernameNotFoundException -> 401 "Account not found." [STOPS HERE]
-   |
-   f) Validate token:
-      jwtService.validateToken(token, userDetails)
-        [OK] username matches ("alice@example.com" == "alice@example.com")
-        [OK] token not expired (exp > now)
-   |
-   g) Set authentication in SecurityContext:
-      SecurityContextHolder.getContext().setAuthentication(authToken)
-      (Spring now knows "alice@example.com with ROLE_CUSTOMER is authenticated")
-   |
-   h) filterChain.doFilter() -> passes to next filter [OK]
-   |
-3. AuthorizationFilter runs:
-   +-- SecurityContext has authenticated user alice
-   +-- GET /api/cart/items matches anyRequest().authenticated()
-   +-- alice IS authenticated -> allowed [OK]
-   |
-4. DispatcherServlet -> CartController.getCart(@AuthenticationPrincipal UserPrincipal principal)
-   |
-5. principal.getId() -> alice's DB id (from the JWT, not from a header)
-   |
-6. CartService.getCart(aliceId)
-   -> SELECT cart_item WHERE user_id = aliceId
-   |
-7. Response: 200 OK
-   [{ "id": 1, "product": {...}, "quantity": 2, "price": 29.98 }, ...]
-```
-
----
-
-## 11. Detailed Flow: Placing an Order (POST /api/order/)
-
-The most complex flow — it touches multiple tables in a single database transaction.
-
-**Request:**
-```
-POST /api/order/
-Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
-```
-
-**Step-by-step:**
-
-```
-1. JWT validated (see section 10)
-   |
-2. OrderController.createOrder(@AuthenticationPrincipal UserPrincipal principal)
-   |
-3. OrderService.createOrder(principal.getId()) — @TRANSACTIONAL
-   |
-   a) Load UserEntity from DB (throws 404 if not found)
-   |
-   b) Load all CartItemEntity rows for this user
-      If cart is empty -> throw 400 "Your cart is empty."
-   |
-   c) For each cart item:
-      +-- Check product is still active (not soft-deleted)
-      |   -> If inactive: throw 409 "[product] is no longer available."
-      |
-      +-- Atomic stock decrement:
-      |   UPDATE products SET stockQuantity = stockQuantity - :qty
-      |   WHERE id = :id AND stockQuantity >= :qty
-      |   Returns 1 (success) or 0 (not enough stock)
-      |   -> If 0: throw 409 "Not enough stock for [product]."
-      |
-      +-- Build OrderItemEntity at current price (not the cart price)
-          Total amount accumulates
-   |
-   d) Save OrderEntity with status = CONFIRMED + all items (cascade)
-   |
-   e) cartService.clearCart(userId) — deletes all cart rows for this user
-   |
-4. If ANY step above throws, the ENTIRE transaction rolls back:
-   -> Stock is NOT decremented
-   -> Order is NOT saved
-   -> Cart is NOT cleared
-   |
-5. Response: 201 CREATED
-   {
-     "id": 42,
-     "user": { ... },
-     "totalAmount": 59.97,
-     "status": "CONFIRMED",
-     "items": [ { "product": {...}, "quantity": 3, "price": 59.97 } ]
-   }
-```
-
-> **Important:** The `@Transactional` annotation on `OrderService.createOrder()` means the entire checkout is **atomic**. If the stock decrement fails halfway through, all earlier decrements roll back automatically.
-
----
-
-## 12. Class-by-Class Breakdown
-
-### `SecurityConfig.java` — The Security Blueprint
-
-Registered as a Spring `@Configuration` bean, read once at startup.
-
-| Method | What It Does |
-|---|---|
-| `securityFilterChain()` | Assembles the filter chain: disables CSRF + form login + HTTP basic, sets STATELESS sessions, defines URL rules, registers 401/403 handlers, injects `JWTFilter` |
-| `corsConfigurationSource()` | Reads `app.cors.allowed-origins` from config, produces a `CorsConfigurationSource` bean |
-| `daoAuthenticationProvider()` | Wires `MyUserDetailsService` + `BCryptPasswordEncoder` so Spring can look up and verify users |
-| `passwordEncoder()` | Returns `BCryptPasswordEncoder` with cost factor 10 |
-| `authenticationManager()` | Exposes `AuthenticationManager` so `UserService.login()` can use it |
-
-**Important decisions:**
-```java
-http.csrf(csrf -> csrf.disable())                        // REST APIs don't need CSRF protection
-http.sessionManagement(session ->
-    session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)) // Never create HttpSession
-http.addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class) // JWT runs first
-http.exceptionHandling(ex -> ex
-    .authenticationEntryPoint(JsonAuthHandlers.unauthorized())   // 401 as JSON
-    .accessDeniedHandler(JsonAuthHandlers.forbidden()))          // 403 as JSON
-```
-
----
-
-### `JWTFilter.java` — The Token Inspector
-
-Extends `OncePerRequestFilter` — Spring guarantees this runs **exactly once per request**.
-
-```
-Incoming Request
-       |
-       v
-Has "Authorization: Bearer ..." header?
-  NO  -> filterChain.doFilter() (pass through, no auth set)
-  YES -> Extract token (strip "Bearer " prefix)
-              |
-              v
-         Parse JWT -> extract username
-              |
-         Error? (malformed / bad signature / expired)
-              -> write 401 JSON + return (STOP)
-              |
-              v (username extracted OK)
-         SecurityContext already has auth?
-              YES -> skip to filterChain.doFilter()
-              NO  -> Load UserDetails from DB
-                          |
-                     Not found? -> write 401 + return (STOP)
-                          |
-                          v
-                     validateToken: username matches AND not expired?
-                          YES -> set auth in SecurityContext
-                          |
-                          v
-                     filterChain.doFilter() -> next filter
-```
-
-> **Note:** `JWTFilter` uses `ApplicationContext.getBean(MyUserDetailsService.class)` instead of `@Autowired` to avoid a circular dependency in the Spring context initialization.
-
----
-
-### `JWTService.java` — The Token Factory
-
-Encapsulates all JWT operations using JJWT 0.13's non-deprecated API.
-
----
-
-### `MyUserDetailsService.java` — The User Loader
-
-Spring Security's `AuthenticationManager` calls `loadUserByUsername()` to verify credentials. The "username" in this application is the user's **email address**.
-
-```java
-@Override
-public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
-    UserEntity user = userRepository.findByEmail(username);
-    if (user == null) throw new UsernameNotFoundException("User not found");
-    return new UserPrincipal(user);
-}
-```
-
----
-
-### `UserPrincipal.java` — The Security Wrapper
-
-Spring Security doesn't know about `UserEntity`. `UserPrincipal` acts as an **adapter** — it wraps your entity and implements `UserDetails`.
-
-```java
-public class UserPrincipal implements UserDetails {
-    private final UserEntity user;
-
-    @Override public String getUsername()  { return user.getEmail(); }
-    @Override public String getPassword()  { return user.getPassword(); } // BCrypt hash
-    @Override public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority("ROLE_" + user.getRole().name()));
-        // "ROLE_CUSTOMER" or "ROLE_ADMIN"
-    }
-
-    public Long getId()       { return user.getId(); }
-    public boolean isAdmin()  { return user.getRole() == UserRole.ADMIN; }
-}
-```
-
-Controllers receive `UserPrincipal` via `@AuthenticationPrincipal` — Spring resolves it directly from the `SecurityContext`, meaning user identity always comes from the validated JWT, never from request headers or body parameters.
-
----
-
-### `JsonAuthHandlers.java` — JSON Security Error Responses
-
-By default, Spring Security returns HTML pages for auth errors. This class overrides that:
-
-| Scenario | Handler | HTTP Status | Message |
+| Name | Table | Columns | Used by |
 |---|---|---|---|
-| No token / bad token | `AuthenticationEntryPoint` | 401 | "Sign in to continue." |
-| Valid token, wrong role | `AccessDeniedHandler` | 403 | "You don't have permission to do that." |
+| `uk_user_entity_email` | `user_entity` | `email` (unique) | Sign-in lookup, duplicate-email protection |
+| `uk_cart_item_user_product` | `cart_item_entity` | `user_id, product_id` (unique) | "Is this product already in my cart?", stops duplicate lines |
+| `idx_products_active_category` | `products` | `active, category` | Catalog filter, category counts |
+| `ft_products_search` | `products` | FULLTEXT `name, category, description` | Catalog search (`MATCH … AGAINST`) |
+| `idx_order_user_created` | `order_entity` | `user_id, created_at` | Order history, newest first |
 
-The `write()` method manually builds JSON (instead of using Jackson) because the full Spring MVC context is not available at the filter level.
-
----
-
-### `GlobalExceptionHandler.java` — Centralized Error Handling
-
-A `@RestControllerAdvice` that intercepts exceptions from controllers and services:
-
-| Exception Type | HTTP Status | Message |
-|---|---|---|
-| `ApiException` | As specified | Custom business message |
-| `BadCredentialsException` / `DisabledException` | 401 | "Email or password is incorrect." |
-| `HttpMessageNotReadableException` | 400 | "Request body is missing or invalid JSON." |
-| `MethodArgumentTypeMismatchException` | 400 | "A parameter is missing or wrong type." |
-| `AccessDeniedException` | 403 | "You don't have permission to do that." |
-| Any other `Exception` | 500 | "Something went wrong." (internals hidden) |
-
-> **Important:** `GlobalExceptionHandler` only handles exceptions that **reach Spring MVC**. Errors from security filters (bad tokens, wrong role) are handled by `JsonAuthHandlers` instead.
+**All relations are `LAZY`.** Related rows are only loaded when a query asks for them with `JOIN FETCH` (see [section 15](#15-database-query-optimization)).
 
 ---
 
-### `ApiError.java` — The Standard Error Shape
+## 6. The Big Picture — What Happens to Every Request?
 
-Every error produces this identical JSON:
-
-```json
-{
-  "status": 401,
-  "error": "Unauthorized",
-  "message": "Your session has expired. Sign in again.",
-  "timestamp": "2026-11-10T11:48:19.123Z"
-}
+```mermaid
+flowchart TD
+    C[Client: browser / Postman / app] -->|HTTP request + optional Bearer token| T["Tomcat (virtual thread per request)"]
+    T --> CORS[CorsFilter]
+    CORS --> JWT["JWTFilter (our code)"]
+    JWT -->|bad / expired token| E401["JSON 401 (JsonAuthHandlers)"]
+    JWT --> AUTHZ["AuthorizationFilter (URL rules)"]
+    AUTHZ -->|no login| U401["JSON 401 (entry point)"]
+    AUTHZ -->|wrong role| F403["JSON 403 (access denied handler)"]
+    AUTHZ --> DS[DispatcherServlet]
+    DS --> CTRL[Controller]
+    CTRL --> SVC["Service (+ cache, transactions)"]
+    SVC --> REPO[Repository]
+    REPO --> DB[(MySQL)]
+    SVC -->|ApiException / any error| GEH["GlobalExceptionHandler → JSON"]
+    CTRL --> OK[JSON response, gzip if over 1 KB]
 ```
 
-`ApiError` is a Java `record`. Its `toJson()` method manually builds JSON (bypassing Jackson) for use in security filters, with a built-in string escaper to prevent injection.
+**Rule of thumb:** if a filter rejects a request, it stops there. It never reaches a controller.
 
 ---
 
-### `ApiException.java` — Business Layer Exceptions
+## 7. Security Configuration (`SecurityConfig`)
 
-Services throw `ApiException` to signal a recoverable error:
+`SecurityConfig` describes the whole security setup in one place. Spring reads it once at startup.
+
+### 7.1 What it turns on and off
 
 ```java
-throw ApiException.badRequest("Enter a valid email address.");        // 400
-throw ApiException.notFound("User not found.");                        // 404
-throw ApiException.conflict("An account with that email exists.");     // 409
-throw ApiException.forbidden("You can only change your own account."); // 403
+http.csrf(AbstractHttpConfigurer::disable)            // No cookies → CSRF attacks don't apply
+    .cors(Customizer.withDefaults())                  // Use the corsConfigurationSource() bean
+    .formLogin(form -> form.disable())                // No HTML login page
+    .httpBasic(basic -> basic.disable())              // No browser username/password popup
+    .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS)) // Never create an HttpSession
+    .exceptionHandling(ex -> ex
+        .authenticationEntryPoint(JsonAuthHandlers.unauthorized())   // 401 as JSON
+        .accessDeniedHandler(JsonAuthHandlers.forbidden()))          // 403 as JSON
+    .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class) // Our JWT check runs first
+    .authenticationProvider(daoAuthenticationProvider());            // Email + BCrypt password check
 ```
 
----
+**In plain words:**
+- **CSRF off:** CSRF attacks rely on the browser sending cookies automatically. This API uses an `Authorization` header that the browser never sends on its own, so CSRF protection isn't needed.
+- **Stateless:** the server keeps no record of who is signed in. The token proves it on every request.
+- **Form login / basic auth off:** this is a JSON API, so there are no login pages or popups.
 
-### `CustomErrorController.java` — Last-Resort Error Page
+### 7.2 URL rules (checked top to bottom, first match wins)
 
-Implements Spring's `ErrorController` to intercept the `/error` path, which Tomcat forwards to when an error happens **outside Spring MVC** (e.g., a 404 for an unmapped URL). Without this, Tomcat would return an HTML error page.
-
----
-
-## 13. Method-by-Method: JWTService
-
-### `generateToken(String username)`
-
-Builds and signs a compact JWT string:
-
-```
-username = "alice@example.com"
-        |
-        v
-Jwts.builder()
-    .claims({})                        <- empty extra claims map
-    .subject("alice@example.com")      <- "sub" claim
-    .issuedAt(now)                     <- "iat" claim
-    .expiration(now + 30 minutes)      <- "exp" claim
-    .signWith(getKey())                <- HMAC-SHA256 with the secret key
-    .compact()
-        |
-        v
-"eyJhbGci..." . "eyJzdWIi..." . "SflKxwRJSMeK..."
- |-- header --| |-- payload --| |-- signature --|
-```
-
-**JWT structure:**
-
-| Section | Decoded content |
+| Rule | Who |
 |---|---|
-| Header | `{"alg":"HS256","typ":"JWT"}` |
-| Payload | `{"sub":"alice@example.com","iat":1731234000,"exp":1731235800}` |
-| Signature | `HMAC-SHA256(base64(header) + "." + base64(payload), secretKey)` |
+| `OPTIONS /**` | Everyone (browser CORS preflight) |
+| `POST /api/users/login`, `POST /api/users/register` | Everyone |
+| `/error`, `/actuator/health` | Everyone |
+| `/actuator/**`, `/api/system/**` | ADMIN |
+| `GET /api/users/`, `GET /api/cart/`, `GET /api/products/` | ADMIN |
+| `POST`, `PUT`, `DELETE /api/products/**` (includes image upload) | ADMIN |
+| Anything else | Any signed-in user |
 
-> **Caution:** The header and payload are **Base64-encoded, not encrypted**. Anyone can decode them. The signature only proves the token wasn't tampered with — keep the secret key private.
+### 7.3 Beans it creates
+
+| Bean | What it does |
+|---|---|
+| `securityFilterChain` | The filter chain above |
+| `corsConfigurationSource` | Allowed origins come from `app.cors.allowed-origins` (env var `CORS_ALLOWED_ORIGINS`). Methods `GET POST PUT PATCH DELETE OPTIONS`. Headers `Authorization, Content-Type`. Preflight cached for 1 hour. |
+| `daoAuthenticationProvider` | Uses `MyUserDetailsService` to find the user by email and `BCryptPasswordEncoder` to check the password |
+| `passwordEncoder` | `BCryptPasswordEncoder(10)`: slow on purpose, salted hashes |
+| `authenticationManager` | Used by `UserService.login()` |
+
+### 7.4 CORS in one minute
+
+When the React app at `http://localhost:5173` calls this API on port `5000`, the browser first sends an `OPTIONS` "preflight" request to ask whether that's allowed. To add a frontend, change the env var. No rebuild needed:
+
+```bash
+CORS_ALLOWED_ORIGINS=http://localhost:5173,https://myshop.example.com
+```
 
 ---
 
-### `validateToken(String token, UserDetails userDetails)`
+## 8. JWT Authentication — Tokens Without a Database Lookup
 
-Two checks must both pass:
+### 8.1 What's inside the token
+
+`JWTService.generateToken(userId, email, role)` builds:
+
+| Part | Content |
+|---|---|
+| Header | `{"alg":"HS256"}` |
+| Payload | `{"sub":"alice@example.com","uid":7,"role":"CUSTOMER","iat":…,"exp":…}` |
+| Signature | HMAC-SHA256 of header + payload, using the secret key |
+
+- **Valid for 30 minutes** (`VALIDITY_MS`).
+- **The signing key is built once** in the constructor (`Keys.hmacShaKeyFor(...)`), not on every call.
+- The payload is **Base64, not encrypted**. Anyone can read it, but nobody can change it without the secret.
+
+### 8.2 How `JWTFilter` uses it (new, faster flow)
+
+```
+Authorization header missing or not "Bearer …"?
+  └─ YES → pass the request on (public URLs still work; protected ones get 401 later)
+
+claims = jwtService.parse(token)     ← ONE call checks the signature AND the expiry
+  └─ JwtException / IllegalArgumentException → JSON 401 "Your session has expired. Sign in again."  (STOP)
+
+Is anyone already authenticated in this request?
+  └─ NO →
+       principal = UserPrincipal.fromToken(uid, sub, role)     ← built from claims, NO database query
+       if the token has no uid/role (issued before this update):
+            principal = MyUserDetailsService.loadUserByUsername(sub)   ← one-time fallback query
+            └─ not found → JSON 401 "Your account could not be found. Sign in again." (STOP)
+       SecurityContextHolder.setAuthentication(principal, roles)
+
+filterChain.doFilter(...)            ← continue to the URL rules and the controller
+```
+
+**Why this matters:** before, every request ran `SELECT … FROM user_entity WHERE email = ?`. Now a normal request skips that query entirely.
+
+> [!NOTE]
+> **Trade-off:** the role and id come from the token. If an admin changes someone's role, or an account is deleted, the change takes effect when that user's current token expires (at most 30 minutes) or when they sign in again.
+
+### 8.3 `UserPrincipal` — two ways to build it
+
+| Constructor | When | Password? |
+|---|---|---|
+| `new UserPrincipal(UserEntity)` | Sign-in (Spring needs the hash to compare) | Yes (BCrypt hash) |
+| `UserPrincipal.fromToken(id, email, role)` | Every other request | No (`null`) |
+
+It returns `ROLE_ADMIN` or `ROLE_CUSTOMER` as its authority, so `hasRole("ADMIN")` works. Controllers get it with `@AuthenticationPrincipal UserPrincipal principal`, so **user identity always comes from the verified token**, never from a header or the request body. The old `X-User-ID` header is no longer read.
+
+### 8.4 Login no longer runs an extra query
 
 ```java
-public boolean validateToken(String token, UserDetails userDetails) {
-    final String userName = extractUserName(token);
-    return (userName.equals(userDetails.getUsername())  // username matches
-            && !isTokenExpired(token));                 // not past exp date
+Authentication auth = authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(email, password));
+UserPrincipal principal = (UserPrincipal) auth.getPrincipal();   // already has id + role
+return jwtService.generateToken(principal.getId(), principal.getUsername(), principal.getRole());
+```
+
+---
+
+## 9. JSON Error Handling Inside the Security Filter (`JsonAuthHandlers`)
+
+### The problem
+
+Security filters run **before** Spring MVC. `@RestControllerAdvice` (the global exception handler) can't see errors that happen there. Without extra work, a bad token would produce an HTML error page, an empty body, or a stack trace.
+
+### The solution
+
+`JsonAuthHandlers` is a small utility class with three pieces:
+
+| Member | Used for | Status | Message |
+|---|---|---|---|
+| `unauthorized()` → `AuthenticationEntryPoint` | Protected URL called with **no** valid login | 401 | "Sign in to continue." |
+| `forbidden()` → `AccessDeniedHandler` | Signed in but **wrong role** (e.g. customer calls an admin URL) | 403 | "You don't have permission to do that." |
+| `write(response, status, message)` | Called directly from `JWTFilter` for bad or expired tokens and deleted accounts | 401 | Custom message |
+
+```java
+public static void write(HttpServletResponse response, HttpStatus status, String message) throws IOException {
+    if (response.isCommitted()) return;                       // never write twice
+    response.setStatus(status.value());
+    response.setCharacterEncoding("UTF-8");
+    response.setContentType("application/json");
+    response.getWriter().write(ApiError.of(status.value(), status.getReasonPhrase(), message).toJson());
 }
 ```
 
----
+**Why `ApiError.toJson()` writes JSON by hand:** it keeps filter-level errors independent of Spring MVC's message converters. It also escapes quotes, backslashes, and control characters, so a message can never break the JSON.
 
-### `extractUserName()` → `extractClaim()` → `extractAllClaims()` chain
-
-```java
-extractUserName(token)
-  -> extractClaim(token, Claims::getSubject)
-       -> extractAllClaims(token)
-             -> Jwts.parser()
-                     .verifyWith(getKey())          // validates signature
-                     .build()
-                     .parseSignedClaims(token)      // decodes all three sections
-                     .getPayload()                  // returns Claims object
-             -> claimResolver.apply(claims)
-             -> claims.getSubject()                 // "alice@example.com"
-```
-
-If the signature is invalid or the token is expired, JJWT throws a `JwtException`, which `JWTFilter` catches and converts to a 401 response.
+After `write(...)`, the filter **returns without calling `filterChain.doFilter`**, so the request stops there.
 
 ---
 
-## 14. Error Handling — End-to-End
+## 10. Global Exception Handling
 
-The application has **two distinct error handling layers** that together ensure every error produces consistent JSON.
-
-```
-Request lifecycle and where errors are caught:
-
-Tomcat -> [JWTFilter] -> [AuthFilter] ->
-                                      |
-                              ERROR LAYER 1: Security Filters (before Spring MVC)
-                              - Bad token       -> 401 (JsonAuthHandlers)
-                              - Wrong role      -> 403 (JsonAuthHandlers)
-
-                    DispatcherServlet
-                              |
-                   Controller -> Service ->
-                                      |
-                              ERROR LAYER 2: GlobalExceptionHandler
-                              - ApiException    -> custom status
-                              - BadCredentials  -> 401
-                              - Bad JSON        -> 400
-                              - Unexpected      -> 500
-
-                   /error path (Tomcat fallback):
-                              -> CustomErrorController (last resort, always JSON)
-```
-
-### Error Response Shape
-
-All three layers produce the same `ApiError` JSON:
+There are three layers. Together they guarantee that **every** error, wherever it happens, comes back in the same shape:
 
 ```json
 {
   "status": 404,
   "error": "Not Found",
-  "message": "User not found.",
-  "timestamp": "2026-11-10T11:48:19.123456Z"
+  "message": "Product not found.",
+  "timestamp": "2026-11-24T18:01:22.123Z"
 }
 ```
 
-### Common Error Scenarios
-
-| Scenario | Layer | Status | Message |
-|---|---|---|---|
-| Missing/malformed JWT | `JWTFilter` | 401 | "Your session has expired. Sign in again." |
-| Token for a deleted account | `JWTFilter` | 401 | "Your account could not be found." |
-| No token at all (protected URL) | `JsonAuthHandlers` | 401 | "Sign in to continue." |
-| Valid token, wrong role | `JsonAuthHandlers` | 403 | "You don't have permission to do that." |
-| Wrong email or password | `GlobalExceptionHandler` | 401 | "Email or password is incorrect." |
-| Duplicate email on register | `GlobalExceptionHandler` | 409 | "An account with that email already exists." |
-| Product not found | `GlobalExceptionHandler` | 404 | "That product is no longer available." |
-| Cart item out of stock | `GlobalExceptionHandler` | 409 | "Only N of [product] in stock." |
-| Empty cart on checkout | `GlobalExceptionHandler` | 400 | "Your cart is empty." |
-| Invalid JSON body | `GlobalExceptionHandler` | 400 | "The request body is missing or isn't valid JSON." |
-| Unexpected server error | `GlobalExceptionHandler` | 500 | "Something went wrong on the server." |
-| Unknown URL (no mapping) | `CustomErrorController` | 404 | "Not Found" |
-
----
-
-## 15. Stateful (Session) vs Stateless (JWT) Security
-
-### The Classic Stateful Way
-
 ```
-STATEFUL FLOW:
-
-1. POST /api/users/login { email, password }
-           |
-2. Server verifies credentials [OK]
-           |
-3. Server creates HTTP Session in memory:
-   Sessions = { "JSESSIONID=abc123" -> { user: "alice", role: "CUSTOMER" } }
-           |
-4. Server: Set-Cookie: JSESSIONID=abc123
-           |
-5. Browser automatically sends cookie on EVERY future request:
-   GET /api/cart/items   Cookie: JSESSIONID=abc123
-           |
-6. Server looks up "abc123" in session store -> finds alice -> she's in
+Layer 1  Security filters        → JsonAuthHandlers         (bad token, no login, wrong role)
+Layer 2  Controllers & services  → GlobalExceptionHandler   (everything thrown inside Spring MVC)
+Layer 3  Anything else           → CustomErrorController    (Tomcat's /error forward, last resort)
 ```
 
-**Problems with stateful sessions:**
-- Server must store one session per logged-in user (RAM/DB overhead).
-- Doesn't scale horizontally — server #2 doesn't know about sessions on server #1.
-- Browsers auto-send cookies, making CSRF attacks possible.
+### 10.1 `ApiException` — throwing business errors
 
----
+Services throw it with a status and a message the user can understand:
 
-### The Stateless JWT Way (this application)
-
-```
-STATELESS JWT FLOW:
-
-1. POST /api/users/login { email, password }
-           |
-2. Server verifies credentials [OK]
-           |
-3. Server creates signed JWT and returns it.
-   Server stores NOTHING — gives token to client and forgets.
-           |
-4. Client stores token (localStorage, memory, etc.)
-           |
-5. Client manually sends token on every protected request:
-   GET /api/cart/items   Authorization: Bearer eyJhbGci...
-           |
-6. Server receives token -> verifies signature -> reads username from claims
-   -> No DB session lookup needed -> grants access
+```java
+throw ApiException.badRequest("Quantity must be at least 1.");          // 400
+throw ApiException.forbidden("You can only view or change your own account."); // 403
+throw ApiException.notFound("Product not found.");                      // 404
+throw ApiException.conflict("Only 3 of Headphones in stock.");          // 409
+throw new ApiException(HttpStatus.BAD_GATEWAY, "Couldn't reach the image service."); // any status
 ```
 
-### Side-by-Side Comparison
+### 10.2 `GlobalExceptionHandler` — what maps to what
 
-| Feature | Stateful (Session) | Stateless (JWT) |
+| Exception | Status | Message sent to the client |
 |---|---|---|
-| Server stores login state? | YES (memory/DB) | NO |
-| Client sends per request | Cookie (automatic) | `Authorization: Bearer` (manual) |
-| Scales horizontally? | Hard (shared session store) | Easy (any server verifies) |
-| Logout | Easy — delete session | Hard — token stays valid until expiry |
-| Token expiry | Server controls session lifetime | Baked into token (`exp` claim) |
-| CSRF risk | YES (cookies are auto-sent) | NO (header is not auto-sent) |
-| Best for | Traditional web apps | REST APIs, Mobile apps, Microservices |
+| `ApiException` | Its own status | Its own message |
+| `BadCredentialsException`, `DisabledException` | 401 | "Email or password is incorrect." |
+| `HttpMessageNotReadableException` | 400 | "The request body is missing or isn't valid JSON." |
+| `MethodArgumentTypeMismatchException`, `MissingServletRequestParameterException` | 400 | "A request parameter is missing or has the wrong type." |
+| `AccessDeniedException` | 403 | "You don't have permission to do that." |
+| `DataIntegrityViolationException` | 400 | "Some details are too long or not allowed…" (logged as a warning) |
+| `MaxUploadSizeExceededException` | 413 | "The file is too large. The limit is 5 MB." |
+| `MissingServletRequestPartException` | 400 | "Choose an image to upload." |
+| `MultipartException` | 400 | "The upload couldn't be read. Send the image as multipart/form-data." |
+| `CannotCreateTransactionException`, `DataAccessResourceFailureException` | **503** | "The shop is busy right now. Try again in a moment." |
+| Spring's own `ErrorResponse` types (unknown path, wrong method…) | Their own 4xx | Standard reason phrase |
+| Any other `Exception` | 500 | "Something went wrong on the server." (full stack trace **logged**, never sent) |
 
-### Why This App Uses `SessionCreationPolicy.STATELESS`
+**Points worth knowing:**
+- **503 on pool exhaustion:** if no database connection frees up within 5 s (`hikari.connection-timeout`), the user gets a friendly "busy" message instead of a crash.
+- **Internals stay hidden:** the 500 handler logs the details for you and sends only a generic message to the client.
 
-```java
-http.sessionManagement(session ->
-    session.sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+### 10.3 `CustomErrorController`
+
+It handles `/error`, where Tomcat forwards errors that happen outside controllers. It reads the status code from the request and returns the same `ApiError` JSON. 5xx errors always say "Something went wrong on the server."
+
+### 10.4 Common error scenarios
+
+| Scenario | Handled by | Status |
+|---|---|---|
+| Expired or tampered JWT | `JWTFilter` → `JsonAuthHandlers.write` | 401 |
+| Old token for a deleted account | `JWTFilter` | 401 |
+| No token on a protected URL | `JsonAuthHandlers.unauthorized` | 401 |
+| Customer calls an admin URL | `JsonAuthHandlers.forbidden` | 403 |
+| Wrong email or password | `GlobalExceptionHandler` | 401 |
+| Register with an email that's taken | `ApiException.conflict` | 409 |
+| Add more than the stock to the cart | `ApiException.conflict` | 409 |
+| Checkout with an empty cart | `ApiException.badRequest` | 400 |
+| Image over 5 MB | `GlobalExceptionHandler` / `ImageUploadService` | 413 |
+| DB pool exhausted | `GlobalExceptionHandler` | 503 |
+| Unknown URL | Spring → `GlobalExceptionHandler` / `CustomErrorController` | 404 |
+
+---
+
+## 11. Role-Based Access Control (RBAC)
+
+There are two roles: `CUSTOMER` (the default) and `ADMIN`.
+
+1. **URL level** → `SecurityConfig` ([section 7.2](#72-url-rules-checked-top-to-bottom-first-match-wins)).
+2. **Ownership level** → `UserController.requireSelfOrAdmin(id, principal)`. Customers can only read or update **their own** account.
+3. **Product visibility** → `GET /api/products/{id}`: admins can open hidden products, customers only see active ones.
+4. **Role escalation protection:**
+   - Register **always** sets `role = CUSTOMER`, whatever the client sends.
+   - `PUT /api/users/{id}` clears `role` unless the caller is an admin. It **never** changes `email` (the JWT subject) or `password` (it would be stored unhashed).
+   - The `User` DTO has **no default role**. A default would silently demote admins on every partial update.
+
+**Making the first admin:**
+
+```sql
+UPDATE user_entity SET role = 'ADMIN' WHERE email = 'admin@example.com';
 ```
 
-Without this, Spring Security might still create an `HttpSession` as a fallback, making the app accidentally stateful.
+After that, an admin can promote others with `PUT /api/users/{id}` `{"role":"ADMIN"}`. The promoted user must **sign in again** to get a token with the new role.
 
-### The Logout Problem with JWT
+---
 
-Since the server stores nothing, you cannot "invalidate" a token. A logged-out user's token remains valid until its 30-minute expiry.
+## 12. Request Flows Step by Step
 
-| Approach | Trade-off |
+### 12.1 Register — `POST /api/users/register` (public)
+
+```
+JWTFilter: no header → pass   →   URL is permitAll   →   UserController.createUser
+UserService.createUser  (@Transactional)
+  ├─ email trimmed + regex check            → 400 "Enter a valid email address."
+  ├─ password ≥ 6 chars                     → 400
+  ├─ first name required                    → 400
+  ├─ email already used?                    → 409 (also protected by the UNIQUE index)
+  ├─ role = CUSTOMER, password = BCrypt(...)
+  ├─ save
+  └─ token = generateToken(id, email, role)
+201 → { "student": { …user without password… }, "token": "eyJ…" }
+```
+
+> The response key is `student` for backwards compatibility with the existing frontend.
+
+### 12.2 Login — `POST /api/users/login` (public)
+
+```
+AuthenticationManager → DaoAuthenticationProvider → MyUserDetailsService.loadUserByUsername(email)
+  → indexed lookup on email → UserPrincipal(with hash) → BCrypt compare
+  ├─ mismatch → BadCredentialsException → 401 "Email or password is incorrect."
+  └─ match    → token from the principal's id + role (no extra query)
+201 → "eyJhbGciOi…"   (the body is the raw token string)
+```
+
+### 12.3 Protected request — `GET /api/cart/items`
+
+```
+JWTFilter: parse token (signature + expiry) → UserPrincipal.fromToken(...)   [no DB]
+AuthorizationFilter: authenticated → OK
+CartController.getCart(@AuthenticationPrincipal principal)
+CartService.getCart(principal.getId())   (@Transactional(readOnly = true))
+  → ONE query: cart lines JOIN FETCH product
+200 → [ { id, user: {id, firstName, lastName, email}, product: {...}, quantity, price } ]
+```
+
+### 12.4 Add to cart — `POST /api/cart/`
+
+```
+validate product id + quantity ≥ 1
+product = findByIdAndActiveTrue(id)                  → 404 if hidden or missing
+existing = findByUserIdAndProductId(user, product)   → uses the unique index from V4
+if (alreadyInCart + quantity > stock)                → 409 "Only N of X in stock." / "X is sold out."
+new line? user = getReferenceById(userId)            → sets the FK without loading the user
+line.quantity += quantity; line.price = price × quantity; save
+```
+
+### 12.5 Checkout — `POST /api/order/` (one transaction)
+
+```
+@Transactional createOrder(userId)
+  ├─ load user                                           → 404 if missing
+  ├─ cart = findByUserIdWithProduct(userId)  (1 query)   → 400 if empty
+  ├─ for each line:
+  │    ├─ product inactive?                              → 409
+  │    ├─ decrementStock(id, qty)  (atomic UPDATE)       → 0 rows? 409 "Not enough stock…"
+  │    └─ OrderItem at the CURRENT price
+  ├─ save order (status CONFIRMED, items cascade)
+  └─ clearCart(userId)  → one bulk DELETE
+201 → Order { id, user (summary), totalAmount, status, items[] }
+
+If anything fails → everything rolls back: stock, order, and cart stay as they were.
+```
+
+---
+
+## 13. Product Catalog — Paging, Full-Text Search, Sorting
+
+### 13.1 Endpoint
+
+```
+GET /api/products/catalog?page=0&size=24&category=Audio&q=sony headphones&sort=price-asc
+```
+
+| Param | Default | Rules |
+|---|---|---|
+| `page` | `0` | 0 to 10,000 |
+| `size` | `24` | 1 to 60 |
+| `category` | none | Exact match, trimmed, max 100 chars |
+| `q` | none | Search text, trimmed, max 100 chars |
+| `sort` | `featured` | `featured`, `price-asc`, `price-desc`, `name`, `newest`. Anything else becomes `featured`. |
+
+**Response (`PageResponse<Product>`):**
+
+```json
+{ "content": [ … ], "page": 0, "size": 24, "totalElements": 120, "totalPages": 5, "last": false }
+```
+
+### 13.2 `CatalogQuery` — clean input, safe cache key
+
+`CatalogQuery.of(...)` clamps numbers, trims text, turns blanks into `null`, and whitelists `sort`. It's a Java **record**, so two queries with the same values are equal. That makes it a good **cache key**: identical searches hit the same cache entry.
+
+### 13.3 How search works (`ProductCatalogRepository`)
+
+It uses native SQL because MySQL's `MATCH … AGAINST` full-text search has no JPQL equivalent.
+
+```
+"Sony WH-1000XM5 headphones"
+      ↓ toBooleanQuery()
+"+sony* +1000xm5* +headphones*"     ← every word required, each matched as a prefix
+                                       words < 3 chars and InnoDB stopwords are dropped
+```
+
+| Case | Strategy |
 |---|---|
-| Short expiry (this app: 30 min) | Simple; user re-authenticates more often |
-| Token blacklist in Redis | Adds state back; works but needs Redis |
-| Refresh token pattern | Short-lived access tokens + long-lived refresh tokens |
+| Latin (ASCII) text with usable words | `MATCH(name, category, description) AGAINST (:ft IN BOOLEAN MODE)` using the `ft_products_search` index |
+| Non-Latin text (e.g. Sinhala), only short words, or only stopwords | `LOWER(name) LIKE :like`, with `%`, `_`, and `\` escaped |
+
+**Sorting:**
+- `featured` while searching → best match first, then in stock, then newest
+- `featured` without search → in stock first, then newest
+- The others sort by price, name, or `created_at`, with `id` as a tie-breaker so pages stay stable
+
+**Security:** only **values** are bound as parameters. `ORDER BY` comes from a fixed `switch`, so client text is never pasted into SQL, and SQL injection isn't possible.
+
+A second `SELECT COUNT(*)` with the same `WHERE` gives `totalElements`.
+
+### 13.4 Categories
+
+```
+GET /api/products/categories  →  [ { "name": "Audio", "count": 4 }, { "name": "Laptops", "count": 2 } ]
+```
+
+This is one `GROUP BY` query over active products, biggest category first. The result is cached.
 
 ---
 
-## 16. CORS Configuration
+## 14. Caching (Caffeine)
 
-CORS (Cross-Origin Resource Sharing) is a browser security mechanism. When your React frontend at `http://localhost:5173` calls this API at `http://localhost:5000`, the browser first sends an `OPTIONS` **preflight request** to ask "is this allowed?".
+### 14.1 What caching means here
 
-### How it's configured
+The first time someone asks for a catalog page, the app queries MySQL and **keeps the answer in memory**. For the next 30 seconds, the same request is answered from memory: no database, close to zero latency.
+
+### 14.2 Setup
 
 ```java
-@Bean
-public CorsConfigurationSource corsConfigurationSource() {
-    // Reads comma-separated origins from application.yml:
-    // app.cors.allowed-origins: http://localhost:5173
-    List<String> origins = Arrays.stream(allowedOrigins.split(","))
-            .map(String::trim).filter(s -> !s.isEmpty()).toList();
-
-    CorsConfiguration config = new CorsConfiguration();
-    config.setAllowedOrigins(origins);
-    config.setAllowedMethods(List.of("GET","POST","PUT","PATCH","DELETE","OPTIONS"));
-    config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
-    config.setMaxAge(3600L); // Cache preflight for 1 hour
-
-    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    source.registerCorsConfiguration("/**", config);
-    return source;
+@Configuration
+@EnableCaching                        // turns on @Cacheable / @CacheEvict
+public class CacheConfig {
+    public static final String CATALOG = "catalog";
+    public static final String CATEGORIES = "categories";
+    public static final String PRODUCT = "product";
+    public static final String ACTIVE_PRODUCTS = "activeProducts";
 }
 ```
 
-All `OPTIONS` preflight requests are explicitly permitted without authentication:
-```java
-.requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-```
-
-### To add more frontend origins
-
-Change `application.yml` only — no code changes needed:
 ```yaml
-app:
-  cors:
-    allowed-origins: http://localhost:5173,https://myshop.example.com
+spring:
+  cache:
+    type: caffeine
+    cache-names: catalog,categories,product,activeProducts
+    caffeine:
+      spec: maximumSize=2000,expireAfterWrite=30s   # max 2000 entries per cache, each lives 30 s
 ```
+
+### 14.3 What is cached
+
+| Method | Cache | Key |
+|---|---|---|
+| `getCatalog(CatalogQuery)` | `catalog` | The whole `CatalogQuery` record |
+| `getCategories()` | `categories` | (no args) |
+| `getActiveProduct(id)` | `product` | Product id |
+| `findActiveProducts()` | `activeProducts` | (no args) |
+| `getAnyProduct`, `getAllProducts`, `searchProducts` | **not cached** | Admin views and legacy search always read live data |
+
+### 14.4 Keeping it fresh
+
+Every product **write** clears all four caches:
+
+```java
+@CacheEvict(cacheNames = {CATALOG, CATEGORIES, PRODUCT, ACTIVE_PRODUCTS}, allEntries = true)
+public Product createProduct(...)  /  updateProduct(...)  /  updateImage(...)  /  deleteProduct(...)
+```
+
+So **admins see their edits immediately**.
+
+> [!NOTE]
+> Stock changes from orders **don't** clear the cache, which would happen on every checkout. A product page may show a stock count up to 30 s old, but **add-to-cart and checkout always check live stock**, so overselling is impossible.
+
+> [!TIP]
+> Caffeine is a per-instance, in-memory cache. If you run several app instances behind a load balancer, each has its own cache (still at most 30 s stale). To share one cache, switch to Redis.
 
 ---
 
-## 17. MapStruct — Entity ↔ DTO Mapping
+## 15. Database Query Optimization
 
-The application strictly separates:
-- **JPA Entities** (`UserEntity`, `ProductEntity`, etc.) — the database layer.
-- **DTOs** (`User`, `Product`, etc.) — the API layer.
+| Technique | Where | What it fixes |
+|---|---|---|
+| **`JOIN FETCH`** | `CartItemRepository.findByUserIdWithProduct`, `findAllWithProductAndUser` | Avoids **N+1**: a cart with 10 items is now 1 query instead of 11 |
+| **`FetchType.LAZY` on every relation** | `CartItemEntity.user/product`, `OrderEntity.user`, `OrderItemEntity.product/order`, `UserEntity.address` | Related rows load only when needed. Sign-in no longer loads the address. |
+| **`@ToString.Exclude` / `@EqualsAndHashCode.Exclude`** | Lazy fields | Lombok's `toString()` and `equals()` can't trigger hidden lazy loads or infinite loops |
+| **`default_batch_fetch_size: 32`** | `application.yml` | When lazy rows must load (e.g. order items' products), Hibernate fetches up to 32 per query with `IN (…)` instead of one each |
+| **`getReferenceById(userId)`** | `CartService.addToCart` | Sets the foreign key without a `SELECT` on the user |
+| **Bulk `@Modifying` deletes** | `deleteLine`, `deleteAllByUserId` | Deletes in one SQL statement instead of load-then-delete per row. `deleteLine` returns 0 or 1, so "not in cart" → 404 needs no extra query. |
+| **Atomic `UPDATE` for stock** | `ProductRepository.decrementStock` | No read-modify-write race. One statement. |
+| **`@Transactional(readOnly = true)`** | All read services | Hibernate skips dirty checking. The driver can optimize. |
+| **`open-in-view: false`** | `application.yml` | The DB connection goes back to the pool as soon as the service method ends, not after the JSON is written |
+| **Indexes** (Flyway V2 to V4) | `products`, `order_entity`, `user_entity`, `cart_item_entity` | Catalog filter, full-text search, sign-in, and cart lookups are index lookups, not table scans |
+| **HikariCP limits** | `maximum-pool-size: 20`, `minimum-idle: 5`, `connection-timeout: 5000` | Caps DB connections (keep pool × instances below RDS `max_connections`) and fails fast with a 503 instead of hanging |
+| **Slow work outside transactions** | `ProductService.updateImage` is **not** `@Transactional` | The ImageKit upload (slow network call) doesn't hold a DB connection |
+| **`UserSummary` in cart and order responses** | `CartItemMapper`, `OrderMapper` | Only `id, firstName, lastName, email` is mapped. Address, role, and dates aren't loaded or sent. |
+| **Gzip compression** | `server.compression` | JSON over 1 KB is compressed. Product lists shrink a lot. |
 
-MapStruct generates the boilerplate conversion code at **compile time** — no runtime reflection, no magic, just generated Java classes.
-
-### How it works
-
-```java
-// UserMapper.java
-@Mapper(componentModel = "spring",
-        nullValuePropertyMappingStrategy = NullValuePropertyMappingStrategy.IGNORE)
-public interface UserMapper {
-    User toUserDto(UserEntity entity);
-    UserEntity toUserEntity(User userDto);
-
-    @Mapping(target = "id", ignore = true)         // Never overwrite the PK
-    @Mapping(target = "address.id", ignore = true)  // Never overwrite nested PK
-    @Mapping(target = "createdAt", ignore = true)   // Hibernate manages this
-    @Mapping(target = "updatedAt", ignore = true)   // Hibernate manages this
-    void updateUserEntityFromDto(User updatedUser, @MappingTarget UserEntity existingUser);
-}
-```
-
-`NullValuePropertyMappingStrategy.IGNORE` enables **partial updates** — if the DTO has a `null` field, the entity's existing value is preserved.
-
-### The `OrderMapper` — handling bi-directional relationships
-
-Orders have items; each item references its parent order. The `@AfterMapping` hook solves the circular reference:
-
-```java
-@AfterMapping
-default void linkOrderItems(@MappingTarget OrderEntity order) {
-    if (order.getItems() != null) {
-        for (OrderItemEntity item : order.getItems()) {
-            item.setOrder(order); // Set back-reference on each child
-        }
-    }
-}
-```
+**N+1, explained simply:** "Give me my cart" → 1 query for cart lines, then 1 query **per line** for its product. With `JOIN FETCH`, the database returns lines and products together in **one** query.
 
 ---
 
-## 18. Concurrency & Stock Safety
+## 16. Database Migrations (Flyway)
 
-A naive checkout would have a race condition where two users buy the last item. This application prevents it with an **atomic SQL UPDATE**:
+### 16.1 Why
+
+Before, `ddl-auto: update` let Hibernate change tables on its own. That's risky in production: no history, no review, and it can't create things like full-text indexes. Now **Flyway** applies versioned SQL files in order and records each one in the `flyway_schema_history` table. Hibernate is set to `ddl-auto: none`.
+
+### 16.2 The migrations
+
+| Version | File | What it does |
+|---|---|---|
+| **V1** | `V1__initial_schema.sql` | Creates all tables exactly as Hibernate used to (for **new, empty** databases) |
+| **V2** | `V2__columns_and_indexes.sql` | `description` → `TEXT`, `image_url` → `VARCHAR(1000)`. Adds `idx_products_active_category`, FULLTEXT `ft_products_search`, `idx_order_user_created`. |
+| **V3** | `V3__unique_email.sql` | `UNIQUE(email)`: one account per email, and fast sign-in lookups |
+| **V4** | `V4__unique_cart_line.sql` | `UNIQUE(user_id, product_id)`: one cart line per product per user |
+
+### 16.3 Existing database? Baseline
+
+```yaml
+spring:
+  flyway:
+    enabled: true
+    baseline-on-migrate: true   # DB has tables but no Flyway history → mark V1 as done
+    baseline-version: 1         # …then run V2, V3, V4
+```
+
+> [!WARNING]
+> **V3 and V4 fail if duplicates already exist.** Check before deploying:
+> ```sql
+> SELECT email, COUNT(*) FROM user_entity GROUP BY email HAVING COUNT(*) > 1;
+> SELECT user_id, product_id, COUNT(*) FROM cart_item_entity GROUP BY user_id, product_id HAVING COUNT(*) > 1;
+> ```
+> Remove or merge the duplicates, then start the app.
+
+### 16.4 Changing the schema from now on
+
+1. Create `src/main/resources/db/migration/V5__short_description.sql`.
+2. Write plain SQL (`ALTER TABLE …`).
+3. Restart the app. Flyway runs it once.
+
+**Never edit a migration that has already run.** Flyway stores a checksum and refuses to start if a file changes. Add a new version instead.
+
+---
+
+## 17. Virtual Threads & Server Tuning
+
+### 17.1 Virtual threads (Java 21)
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true
+```
+
+**Simple explanation:** normally Tomcat has a pool of about 200 **OS threads**. Each request holds one, even while it's just *waiting* for MySQL or ImageKit. When all 200 are waiting, new requests queue.
+
+With **virtual threads**, each request gets a very cheap thread managed by the JVM. When it waits on I/O, the JVM *parks* it and frees the OS thread for other work. You can have thousands of concurrent requests without thousands of OS threads.
+
+| | Platform threads | Virtual threads |
+|---|---|---|
+| Cost per thread | ~1 MB stack, OS-managed | A few KB, JVM-managed |
+| While waiting on DB/HTTP | Holds an OS thread | Releases it |
+| Practical limit | Hundreds | Thousands or more |
+| Code changes needed | — | **None.** It's one config flag. |
+
+> [!IMPORTANT]
+> Virtual threads don't create more **database connections**. The HikariCP pool (20) is still the real limit for DB work. That's why `connection-timeout: 5000` and the 503 "shop is busy" handler exist.
+
+### 17.2 Other server settings
+
+| Setting | Value | Why |
+|---|---|---|
+| `server.compression.enabled` | `true` (JSON/text ≥ 1 KB) | Smaller responses, faster pages |
+| `server.shutdown` | `graceful` | In-flight requests finish before the app stops (up to 20 s, `timeout-per-shutdown-phase`) |
+| `spring.servlet.multipart.max-file-size` | `5MB` | Image limit |
+| `spring.servlet.multipart.max-request-size` | `6MB` | Whole multipart request limit |
+| `server.tomcat.max-swallow-size` | `10MB` | Tomcat reads past an oversized upload, so the client gets a clean 413 JSON instead of a dropped connection |
+
+---
+
+## 18. Product Image Uploads (ImageKit)
+
+```
+POST /api/products/{id}/image     (ADMIN, multipart/form-data, field name "file")
+```
+
+**`ImageKitConfig`** creates one `ImageKitClient` bean: private key from config, 60 s timeout, 2 retries, closed on shutdown. Startup fails fast if the key is missing.
+
+**`ImageUploadService.upload(file, productName)` checks, in order:**
+
+1. File present → else 400 "Choose an image to upload."
+2. Size ≤ 5 MB → else 413.
+3. Content type is JPEG, PNG, WebP, GIF, or AVIF → else 400.
+4. **Magic bytes:** the first bytes of the file must really match an image signature. A renamed `.exe` is rejected even if the browser says `image/png`.
+5. File name = slug of the product name (`"Wireless Headphones!"` → `wireless-headphones.jpg`). ImageKit adds a unique suffix.
+6. Upload to the configured folder (`/products`) with the tag `product`.
+7. ImageKit errors → **502 Bad Gateway** with a friendly message (logged with details).
+
+**`ProductService.updateImage` flow (no orphaned files):**
+
+```
+upload new image ─► save url + fileId on the product
+                     ├─ save fails → delete the NEW image from ImageKit, rethrow
+                     └─ save OK   → delete the OLD image from ImageKit (quietly)
+clear product caches
+```
+
+`deleteQuietly` logs failures but never throws, so a cleanup problem can't break a successful save. If an admin replaces `imageUrl` by hand through `PUT /api/products/{id}`, the old ImageKit file is deleted too.
+
+---
+
+## 19. DTOs, Records & MapStruct
+
+### 19.1 Entities vs DTOs
+
+- **Entities** (`*Entity`) = database tables. Never returned directly.
+- **DTOs** = what the API sends and receives. Sensitive fields are protected:
+  - `User.password` is `@JsonProperty(access = WRITE_ONLY)`: accepted in requests, **never** in responses.
+  - `ProductMapper` ignores `imageFileId`, so clients can't set or see ImageKit internals.
+
+### 19.2 New small types (Java records)
+
+| Type | Purpose |
+|---|---|
+| `CatalogQuery` | Cleaned catalog params + cache key |
+| `PageResponse<T>` | `content, page, size, totalElements, totalPages, last` |
+| `CategoryCount` | `{ name, count }` |
+| `UploadedImage` | `{ url, fileId }` from ImageKit |
+| `ApiError` | The error body |
+| `UserSummary` (class) | `id, firstName, lastName, email`, used inside cart lines and orders |
+
+Records are immutable and compare by value: a short way to write "just data".
+
+### 19.3 Mappers
+
+| Mapper | Notes |
+|---|---|
+| `UserMapper` | `toUserDto`, `toUserEntity`, `toUserSummary`. `updateUserEntityFromDto` ignores `id`, `address.id`, `createdAt`, `updatedAt`. |
+| `ProductMapper` | Ignores `imageFileId` both ways |
+| `CartItemMapper` | Entity → DTO only. Uses `UserMapper.toUserSummary` + `ProductMapper`. |
+| `OrderMapper` | Entity → DTO only (orders are built in `OrderService`, never from request JSON) |
+
+`NullValuePropertyMappingStrategy.IGNORE` on `UserMapper` and `ProductMapper` enables **partial updates**: fields sent as `null` (or left out) keep their stored values.
+
+---
+
+## 20. Concurrency & Stock Safety
 
 ```java
-// ProductRepository.java
 @Modifying
-@Query("UPDATE products p " +
-       "SET p.stockQuantity = p.stockQuantity - :qty " +
-       "WHERE p.id = :id AND p.stockQuantity >= :qty")
-int decrementStock(@Param("id") Long id, @Param("qty") int qty);
+@Query("UPDATE products p SET p.stockQuantity = p.stockQuantity - :qty WHERE p.id = :id AND p.stockQuantity >= :qty")
+int decrementStock(@Param("id") Long id, @Param("qty") int qty);   // 1 = reserved, 0 = not enough
 ```
 
-This runs as one atomic statement. The database's row-level locking ensures only one transaction wins when two requests race. Returns `1` on success, `0` if stock is insufficient:
-
-```java
-// OrderService.createOrder()
-int reserved = productRepository.decrementStock(product.getId(), line.getQuantity());
-if (reserved == 0) {
-    throw ApiException.conflict("Not enough stock for " + product.getName() + ".");
-}
-```
-
-Combined with `@Transactional` on `createOrder()`, any failure mid-order causes all prior stock decrements to roll back automatically.
+- **One SQL statement:** MySQL locks the row, so when two checkouts race for the last item, exactly one gets `1` and the other gets `0` → 409.
+- **`@Transactional` on `createOrder`:** if line 3 fails, the stock taken for lines 1 and 2 is **rolled back**.
+- **Add-to-cart checks the new total** (`alreadyInCart + quantity > stock`), not just the amount being added.
+- **Unique `(user_id, product_id)`** stops two parallel "add" requests from creating duplicate cart lines.
+- **Customers pay the current price** at checkout, not the price saved when the item went into the cart.
 
 ---
 
-## 19. Configuration Reference (`application.yml`)
+## 21. Class-by-Class Reference
+
+| Class | Responsibility |
+|---|---|
+| `Main` | Starts Spring Boot |
+| `SecurityConfig` | Filter chain, URL rules, CORS, BCrypt, auth provider, `AuthenticationManager` |
+| `CacheConfig` | Enables caching. Holds cache name constants. |
+| `ImageKitConfig` | Builds the ImageKit client |
+| `JWTFilter` | Parses the token once, builds `UserPrincipal` from claims (DB fallback for old tokens), writes JSON 401 on failure |
+| `JsonAuthHandlers` | JSON 401 entry point, JSON 403 handler, `write()` helper |
+| `JWTService` | `generateToken(id, email, role)`, `parse(token)`, `extractUserName(token)`. Key built once. |
+| `MyUserDetailsService` | Loads a user by email for sign-in |
+| `UserService` | Register (validation, BCrypt, forced CUSTOMER), login, get and update users |
+| `ProductService` | Cached reads, cache-evicting writes, image replacement, soft delete |
+| `ImageUploadService` | Validates and uploads images, deletes old ones |
+| `CartService` | Add (stock-checked, merges lines), remove (bulk delete), view (JOIN FETCH), clear |
+| `OrderService` | Transactional checkout with atomic stock reservation |
+| `ProductCatalogRepository` | Native SQL catalog: filter, full-text or LIKE search, whitelisted sort, count |
+| `ProductRepository` | Active product lookups, legacy search, category counts, `decrementStock` |
+| `CartItemRepository` | Line lookup, JOIN FETCH lists, bulk deletes |
+| `UserRepository` / `OrderRepository` | Standard JPA repositories |
+| `GlobalExceptionHandler` | Maps exceptions to `ApiError` JSON |
+| `ApiException` / `ApiError` | Business error type / JSON error body (with safe hand-written JSON) |
+| `CustomErrorController` | JSON for Tomcat's `/error` |
+| `UserPrincipal` | Signed-in user, from the DB (sign-in) or from the token (every other request) |
+| `SystemController` | Admin-only OS/Java info |
+
+---
+
+## 22. Configuration Reference (`application.yml`)
 
 ```yaml
 server:
-  port: ${PORT:5000}          # Uses PORT env var if set, else defaults to 5000
+  port: ${PORT:5000}
+  compression: { enabled: true, mime-types: application/json,text/plain, min-response-size: 1KB }
+  shutdown: graceful
+  tomcat: { max-swallow-size: 10MB }
 
 spring:
+  threads.virtual.enabled: true                 # Java 21 virtual threads
+  lifecycle.timeout-per-shutdown-phase: 20s
+  servlet.multipart: { max-file-size: 5MB, max-request-size: 6MB }
   datasource:
-    url: jdbc:mysql://localhost:3306/ecommerce
-    username: root
-    password: 123             # Use environment variables in production!
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${DB_URL}                              # use env vars, never commit real values
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari: { maximum-pool-size: ${DB_POOL_SIZE:20}, minimum-idle: 5, connection-timeout: 5000 }
   jpa:
-    database-platform: org.hibernate.dialect.MySQLDialect
-    hibernate:
-      ddl-auto: update        # Auto-creates/updates tables. Use 'validate' in production.
-    show-sql: true            # Logs all SQL. Set to false in production.
-    properties:
-      hibernate:
-        format_sql: true
+    open-in-view: false
+    hibernate.ddl-auto: none                    # Flyway owns the schema
+    show-sql: ${SHOW_SQL:false}
+    properties.hibernate.default_batch_fetch_size: 32
+  flyway: { enabled: true, baseline-on-migrate: true, baseline-version: 1 }
+  cache:
+    type: caffeine
+    cache-names: catalog,categories,product,activeProducts
+    caffeine.spec: maximumSize=2000,expireAfterWrite=30s
 
-jwt:
-  # Base64 string of at least 32 random bytes.
-  # Generate with: openssl rand -base64 32
-  secret: YourSuperSecretKeyThatIsAtLeast32BytesLong123!
+jwt.secret: ${JWT_SECRET}                       # openssl rand -base64 32
 
-app:
-  cors:
-    # Comma-separated frontend origins allowed to call the API from a browser.
-    allowed-origins: http://localhost:5173
+imagekit:
+  private-key: ${IMAGEKIT_PRIVATE_KEY}
+  folder: ${IMAGEKIT_FOLDER:/products}
+  max-file-size-bytes: 5242880
+
+app.cors.allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
 
 management:
-  endpoints:
-    web:
-      exposure:
-        # Only safe endpoints. Never expose 'env' or 'heapdump' in production.
-        include: health,info
-  endpoint:
-    health:
-      show-details: when-authorized
-      roles: ADMIN
-
-info:
-  app:
-    name: Ecommerce-App
-    description: Ecommerce Backend Application
-    version: 1.0.0
+  endpoints.web.exposure.include: health,info   # never expose env / heapdump
+  endpoint.health: { show-details: when-authorized, roles: ADMIN }
 ```
 
-> **Caution:** Never commit real credentials or JWT secrets to source control. Use environment variables or a secrets manager (e.g., Spring Cloud Config, AWS Secrets Manager) in production.
+**Environment variables** (see `.env.example`):
+
+| Variable | Example |
+|---|---|
+| `DB_URL` | `jdbc:mysql://your-rds-host:3306/ecommerce` |
+| `DB_USERNAME` / `DB_PASSWORD` | Your DB credentials |
+| `DB_POOL_SIZE` | `20` |
+| `JWT_SECRET` | Output of `openssl rand -base64 32` |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,https://your-shop.com` |
+| `IMAGEKIT_PRIVATE_KEY` | From ImageKit → Developer options → API keys |
+| `IMAGEKIT_FOLDER` | `/products` |
+| `PORT` | `5000` |
+
+> [!CAUTION]
+> Never commit real database passwords, JWT secrets, or ImageKit private keys. If one was ever committed, treat it as public: **rotate it** and move it to an environment variable.
 
 ---
 
-## 20. Complete API Reference
+## 23. Complete API Reference
 
-### Authentication Endpoints
+**Legend:** ❌ public · 🔑 any signed-in user · 🔐 ADMIN
 
-| Method | URL | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/users/register` | ❌ Public | Register new user; returns `{ user, token }` |
-| `POST` | `/api/users/login` | ❌ Public | Authenticate; returns JWT string |
-
-### User Endpoints
+### Auth
 
 | Method | URL | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/users/` | 🔐 ADMIN | List all users |
-| `GET` | `/api/users/me` | 🔑 Any | Get own profile (from JWT) |
-| `GET` | `/api/users/{id}` | 🔑 Self or ADMIN | Get user by ID |
-| `PUT` | `/api/users/{id}` | 🔑 Self or ADMIN | Update user (password/email locked; role ADMIN-only) |
+| `POST` | `/api/users/register` | ❌ | Register → `{ student, token }` (201) |
+| `POST` | `/api/users/login` | ❌ | Sign in → raw JWT string (201) |
 
-### Product Endpoints
+### Users
 
 | Method | URL | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/products/` | 🔐 ADMIN | List all products (including inactive) |
-| `GET` | `/api/products/active` | 🔑 Any | List active, in-stock products |
-| `GET` | `/api/products/search?keyword=` | 🔑 Any | Search active products by name |
-| `POST` | `/api/products/` | 🔐 ADMIN | Create new product |
-| `PUT` | `/api/products/{id}` | 🔐 ADMIN | Update product |
-| `DELETE` | `/api/products/{id}` | 🔐 ADMIN | Soft-delete (sets `active = false`) |
+| `GET` | `/api/users/` | 🔐 | All users |
+| `GET` | `/api/users/me` | 🔑 | Your own profile |
+| `GET` | `/api/users/{id}` | 🔑 self / 🔐 | One user |
+| `PUT` | `/api/users/{id}` | 🔑 self / 🔐 | Partial update. Email and password locked. Role: admin only. |
 
-### Cart Endpoints
+### Products
 
 | Method | URL | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/cart/` | 🔐 ADMIN | View all users' cart items |
-| `GET` | `/api/cart/items` | 🔑 Any | View own cart |
-| `POST` | `/api/cart/` | 🔑 Any | Add item to own cart |
-| `DELETE` | `/api/cart/{productId}` | 🔑 Any | Remove item from own cart |
+| `GET` | `/api/products/catalog` | 🔑 | 🆕 Paged, filtered, searchable, sortable listing (cached) |
+| `GET` | `/api/products/categories` | 🔑 | 🆕 Categories with counts (cached) |
+| `GET` | `/api/products/{id}` | 🔑 | 🆕 One product (customers: active only, cached; admins: any) |
+| `GET` | `/api/products/active` | 🔑 | All active products (cached) |
+| `GET` | `/api/products/search?keyword=` | 🔑 | Legacy name search (active, in stock) |
+| `GET` | `/api/products/` | 🔐 | All products, including hidden |
+| `POST` | `/api/products/` | 🔐 | Create |
+| `PUT` | `/api/products/{id}` | 🔐 | Partial update |
+| `DELETE` | `/api/products/{id}` | 🔐 | Soft delete (`active = false`) |
+| `POST` | `/api/products/{id}/image` | 🔐 | 🆕 Upload image (multipart, field `file`, ≤ 5 MB) |
 
-### Order Endpoints
+### Cart
 
 | Method | URL | Auth | Description |
 |---|---|---|---|
-| `POST` | `/api/order/` | 🔑 Any | Checkout: convert cart to order |
+| `GET` | `/api/cart/items` | 🔑 | Your cart |
+| `POST` | `/api/cart/` | 🔑 | Add `{ "product": { "id": 1 }, "quantity": 2 }` |
+| `DELETE` | `/api/cart/{productId}` | 🔑 | Remove a line (404 if it's not in your cart) |
+| `GET` | `/api/cart/` | 🔐 | Every user's cart lines |
 
-### System & Health Endpoints
+### Orders
 
 | Method | URL | Auth | Description |
 |---|---|---|---|
-| `GET` | `/actuator/health` | ❌ Public | App health check |
-| `GET` | `/actuator/info` | ❌ Public | App version info |
-| `GET` | `/api/system/info` | 🔐 ADMIN | Server OS/JVM info |
+| `POST` | `/api/order/` | 🔑 | Checkout your cart (201) |
 
-**Legend:** ❌ Public (no token) · 🔑 Authenticated (any role) · 🔐 ADMIN role required
+### System
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| `GET` | `/actuator/health` | ❌ | Health (details for admins) |
+| `GET` | `/actuator/info` | 🔐 | App info |
+| `GET` | `/api/system/info` | 🔐 | OS/Java info |
 
 ---
 
-## 21. How to Run Locally
+## 24. How to Run Locally
 
 ### Prerequisites
-
 - Java 21+
 - Maven 3.8+
-- MySQL 8+ running locally
+- MySQL 8+
 
-### 1. Create the database
+### Steps
 
 ```sql
+-- 1. Create an empty database (Flyway creates the tables)
 CREATE DATABASE ecommerce;
 ```
 
-### 2. Configure `application.yml`
-
-The defaults expect MySQL at `localhost:3306`, database `ecommerce`, username `root`, password `123`. Adjust as needed.
-
-```yaml
-# Change the JWT secret for local dev (keep it at least 32 bytes base64-encoded):
-jwt:
-  secret: YourSuperSecretKeyThatIsAtLeast32BytesLong123!
-```
-
-### 3. Build and run
-
 ```bash
-# From the project root (where pom.xml lives):
+# 2. Set environment variables (or add them to your IntelliJ run configuration)
+export DB_URL=jdbc:mysql://localhost:3306/ecommerce
+export DB_USERNAME=root
+export DB_PASSWORD=your-password
+export JWT_SECRET=$(openssl rand -base64 32)
+export IMAGEKIT_PRIVATE_KEY=private_xxx
+export CORS_ALLOWED_ORIGINS=http://localhost:5173
+
+# 3. Run
 mvn clean spring-boot:run
-```
 
-Or build a JAR first:
-```bash
+# or build a jar
 mvn clean package -DskipTests
-java -jar target/ECommerceApp.jar
+java -jar target/EcommerceApp-1.0-SNAPSHOT.jar
 ```
 
-The server starts on port `5000` by default. Set the `PORT` environment variable to change it.
-
-### 4. Hibernate will auto-create tables
-
-`ddl-auto: update` means Hibernate reads your entities and creates or updates the MySQL tables automatically on startup.
+On startup, **Flyway** runs V1 to V4 on an empty database (or baselines an existing one and runs V2 to V4). The server listens on port **5000** (override with `PORT`).
 
 ---
 
-## 22. Quick Reference: Postman Walkthrough
+## 25. Postman Walkthrough
 
-### Step 1 — Register
-
-```
+```http
+### 1. Register
 POST http://localhost:5000/api/users/register
 Content-Type: application/json
 
-{
-  "firstName": "Alice",
-  "lastName":  "Smith",
-  "email":     "alice@example.com",
-  "password":  "secret123"
-}
-```
+{ "firstName": "Alice", "lastName": "Smith", "email": "alice@example.com", "password": "secret123" }
 
-Copy the `token` from the response.
-
-### Step 2 — Login (get a fresh token any time)
-
-```
+### 2. Login (response body = token)
 POST http://localhost:5000/api/users/login
 Content-Type: application/json
 
-{
-  "email":    "alice@example.com",
-  "password": "secret123"
-}
-```
+{ "email": "alice@example.com", "password": "secret123" }
 
-The response body IS the token string.
+### 3. Browse the catalog
+GET http://localhost:5000/api/products/catalog?page=0&size=12&q=headphones&sort=price-asc
+Authorization: Bearer <token>
 
-### Step 3 — Browse products
+### 4. Categories
+GET http://localhost:5000/api/products/categories
+Authorization: Bearer <token>
 
-```
-GET http://localhost:5000/api/products/active
-Authorization: Bearer <your-token-here>
-```
-
-### Step 4 — Add to cart
-
-```
+### 5. Add to cart
 POST http://localhost:5000/api/cart/
-Authorization: Bearer <your-token-here>
+Authorization: Bearer <token>
 Content-Type: application/json
 
-{
-  "product": { "id": 1 },
-  "quantity": 2
-}
-```
+{ "product": { "id": 1 }, "quantity": 2 }
 
-### Step 5 — Place order
-
-```
+### 6. Checkout (no body)
 POST http://localhost:5000/api/order/
-Authorization: Bearer <your-token-here>
-```
+Authorization: Bearer <token>
 
-No body needed — the order is built from your cart.
-
-### Step 6 — Admin: Create a product
-
-```
+### 7. Admin: create a product
 POST http://localhost:5000/api/products/
 Authorization: Bearer <admin-token>
 Content-Type: application/json
 
-{
-  "name": "Wireless Mouse",
-  "description": "Ergonomic 2.4GHz wireless mouse",
-  "price": 29.99,
-  "stockQuantity": 150,
-  "category": "Electronics",
-  "imageUrl": "https://example.com/mouse.jpg"
-}
-```
+{ "name": "Wireless Mouse", "description": "Ergonomic 2.4GHz mouse", "price": 29.99,
+  "stockQuantity": 150, "category": "Electronics" }
 
-> **Tip:** To promote a user to ADMIN, update their role directly in MySQL:
-> ```sql
-> UPDATE user_entity SET role = 'ADMIN' WHERE email = 'admin@example.com';
-> ```
-> Then log in again to get a new token with the ADMIN role baked in.
+### 8. Admin: upload its image
+POST http://localhost:5000/api/products/1/image
+Authorization: Bearer <admin-token>
+Content-Type: multipart/form-data
+file = <choose a JPG/PNG/WebP/GIF/AVIF ≤ 5 MB>
+```
 
 ---
 
-*Generated for the **Ecommerce-Backend-secured** project — a Spring Boot 4 + JWT e-commerce REST API.*
+## 26. Known Issues & Next Steps
+
+| Item | Note |
+|---|---|
+| **Dockerfile** | Copies `ECommerceApp.jar` but runs `job-app.jar` and exposes `8080`, while Maven builds `target/EcommerceApp-1.0-SNAPSHOT.jar` and the app listens on `5000`. Align the names and port before using Docker. |
+| **Secrets in config** | Make sure `application.yml` and `.env.example` contain only `${ENV_VAR}` placeholders, not real values. |
+| **JWT logout** | Tokens stay valid until expiry (30 min). Options: refresh tokens, or a Redis deny-list. |
+| **Role changes** | Take effect on the user's next sign-in (or when their token expires), because the role lives in the token. |
+| **Order history** | `idx_order_user_created` is ready, but there's no `GET /api/order/` endpoint yet. |
+| **Distributed cache** | Caffeine is per instance. Use Redis if you scale out and need one shared cache. |
+| **Bean Validation** | Validation is manual in services. `jakarta.validation` (`@Valid`, `@NotBlank`) could replace it. |
+
+---
+
+*Ecommerce-Backend-secured — Spring Boot 4 · JWT · Flyway · Caffeine · Virtual Threads · ImageKit.*
